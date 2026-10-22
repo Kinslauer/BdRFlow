@@ -4,7 +4,7 @@ import { useBlockedKeywordMatch, useFeedActionsStore } from '../../store/useFeed
 import { useBlockedRevealStore } from '../../lib/blockedContent';
 import { BlockedVideoCard } from './BlockedVideoCard';
 import { useLiveStore } from '../../store/useLiveStore';
-import { Plus, Ban, Check, MoreVertical, Trash2, GripHorizontal, Sparkles, Eye, EyeOff, Clock, ListPlus, Download, User, Info } from 'lucide-react';
+import { Plus, Ban, Check, MoreVertical, Trash2, GripHorizontal, Sparkles, Eye, EyeOff, Clock, ListPlus, Download, User, Info, ExternalLink } from 'lucide-react';
 import type { VideoSummary } from '../../types/video';
 import { Button } from '../ui/Button';
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
@@ -24,6 +24,7 @@ import { useWatchLaterStore } from '../../store/useWatchLaterStore';
 import { useUiStore } from '../../store/useUiStore';
 import { usePlaylistModalStore } from '../../store/usePlaylistModalStore';
 import { usePlayerStore } from '../../store/usePlayerStore';
+import { isNewTabClick, openVideoInNewTab } from '../../lib/tabs';
 import { useDownloadStore } from '../../store/useDownloadStore';
 import { useDownloadsLibraryStore } from '../../store/useDownloadsLibraryStore';
 import { findDownloadedRecord, useIsDownloaded } from '../../lib/useDownloads';
@@ -210,6 +211,29 @@ function VideoCardComponent({
     }
   }, [displayThumbnail, dominantColor, handleThumbnailError, isHovered, thumbnailCandidates]);
 
+  // Plain click plays here; Ctrl/Cmd+click or middle-click opens a background tab.
+  const playTargetProps = useMemo(() => ({
+    onClick: (e: React.MouseEvent) => {
+      if (isNewTabClick(e)) {
+        e.preventDefault();
+        e.stopPropagation();
+        openVideoInNewTab(video);
+        return;
+      }
+      onPlay(video);
+    },
+    // Middle-button down would otherwise start the webview's autoscroll.
+    onMouseDown: (e: React.MouseEvent) => {
+      if (e.button === 1) e.preventDefault();
+    },
+    onAuxClick: (e: React.MouseEvent) => {
+      if (e.button !== 1) return;
+      e.preventDefault();
+      e.stopPropagation();
+      openVideoInNewTab(video);
+    },
+  }), [onPlay, video]);
+
   const handleContextMenu = useCallback((e: React.MouseEvent) => {
     if (isChannel) return;
     e.preventDefault();
@@ -352,6 +376,18 @@ function VideoCardComponent({
             </span>
           </div>
         ) : null}
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            openVideoInNewTab(video);
+            setShowMenu(false);
+          }}
+          className="w-full flex items-center gap-3 px-3.5 py-2.5 text-sm text-chrome-zinc-300 hover:bg-chrome-zinc-800 hover:text-chrome-zinc-100 transition-colors"
+        >
+          <ExternalLink size={16} />
+          {getString("tabs_open_in_new_tab")}
+        </button>
         <button
           onClick={(e) => {
             e.stopPropagation();
@@ -523,7 +559,7 @@ function VideoCardComponent({
         <ColorWash active={isHovered} color={dominantColor} alpha={0.2} spread="row" />
         <div
           className="relative aspect-video w-40 shrink-0 cursor-pointer overflow-hidden rounded-xl bg-surface-container"
-          onClick={() => onPlay(video)}
+          {...playTargetProps}
         >
           {displayThumbnail ? (
             <img
@@ -551,7 +587,7 @@ function VideoCardComponent({
 
         <div className="flex min-w-0 flex-1 flex-col">
           <h3
-            onClick={() => onPlay(video)}
+            {...playTargetProps}
             style={titleClampStyle}
             className="cursor-pointer text-sm font-medium leading-snug text-chrome-neutral-100 transition-colors group-hover:text-primary"
           >
@@ -623,7 +659,7 @@ function VideoCardComponent({
 
         <div
           className="relative aspect-video w-40 shrink-0 cursor-pointer overflow-hidden rounded-xl bg-chrome-zinc-900 sm:w-48"
-          onClick={() => onPlay(video)}
+          {...playTargetProps}
         >
           {displayThumbnail ? (
             <img
@@ -652,7 +688,7 @@ function VideoCardComponent({
 
         <div className="flex min-w-0 flex-1 flex-col">
           <h3
-            onClick={() => onPlay(video)}
+            {...playTargetProps}
             style={titleClampStyle}
             className="cursor-pointer text-sm font-medium leading-snug text-chrome-neutral-100 transition-colors hover:text-[var(--color-primary)]"
           >
@@ -708,7 +744,7 @@ function VideoCardComponent({
       <ColorWash active={isHovered} color={dominantColor} alpha={0.2} />
       <div
         className="relative w-full aspect-video rounded-xl overflow-hidden bg-chrome-zinc-900 cursor-pointer"
-        onClick={() => onPlay(video)}
+        {...playTargetProps}
       >
         {displayThumbnail ? (
           <img
@@ -781,7 +817,7 @@ function VideoCardComponent({
 
         <div className="flex flex-col flex-1 min-w-0">
           <h3
-            onClick={() => onPlay(video)}
+            {...playTargetProps}
             style={titleClampStyle}
             className="text-chrome-zinc-100 text-sm font-medium leading-snug cursor-pointer hover:text-[var(--color-primary)] transition-colors"
           >

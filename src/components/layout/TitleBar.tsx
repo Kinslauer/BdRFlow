@@ -5,12 +5,13 @@ import { useNativeWindowTitle } from "../../lib/useNativeWindowTitle";
 import { useResolvedWindowTitle } from "../../lib/useResolvedWindowTitle";
 import { useWindowControls } from "../../lib/useWindowControls";
 import { WindowResizeEdges } from "../ui/WindowResizeEdges";
+import { TabStrip } from "../tabs/TabStrip";
 
 function cx(...classes: Array<string | false | null | undefined>) {
   return classes.filter(Boolean).join(" ");
 }
 
-export function TitleBar() {
+export function TitleBar({ showTabs = false }: { showTabs?: boolean }) {
   const { t } = useTranslation();
   const { text, section } = useResolvedWindowTitle();
   const { isMaximized, isFullscreen, minimize, toggleMaximize, close } = useWindowControls();
@@ -26,23 +27,27 @@ export function TitleBar() {
       <div className="relative z-[100] flex h-[var(--app-titlebar-height)] shrink-0 select-none items-center border-b border-outline-variant/60 bg-background">
         <div data-tauri-drag-region className="absolute inset-0" />
 
-        <div className="pointer-events-none absolute inset-0 flex items-center justify-center px-40">
-          {text && (
-            <span
-              className={cx(
-                "max-w-full truncate text-center text-xs",
-                section
-                  ? "font-semibold uppercase tracking-[0.14em] text-on-surface-variant"
-                  : "font-medium tracking-wide text-on-surface"
-              )}
-            >
-              {text}
-            </span>
-          )}
-        </div>
+        {showTabs ? (
+          <TabStrip />
+        ) : (
+          <div className="pointer-events-none absolute inset-0 flex items-center justify-center px-40">
+            {text && (
+              <span
+                className={cx(
+                  "max-w-full truncate text-center text-xs",
+                  section
+                    ? "font-semibold uppercase tracking-[0.14em] text-on-surface-variant"
+                    : "font-medium tracking-wide text-on-surface"
+                )}
+              >
+                {text}
+              </span>
+            )}
+          </div>
+        )}
 
         {/* Window controls */}
-        <div className="relative z-10 ml-auto flex h-full items-center">
+        <div className="relative z-10 ml-auto flex h-full shrink-0 items-center">
           <button
             type="button"
             aria-label={t("windowMinimize")}

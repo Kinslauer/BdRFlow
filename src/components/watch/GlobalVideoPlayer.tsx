@@ -7,6 +7,7 @@ import { usePlayerStore } from "../../store/usePlayerStore";
 import { SETTINGS } from "../../lib/settings/schema";
 import { FlowPlayerCore } from "./FlowPlayerCore";
 import { useMediaSessionMetadata } from "../../lib/useMediaSessionMetadata";
+import { focusTabForVideo } from "../../lib/tabs";
 
 type PlayerBounds = {
   top: number;
@@ -198,6 +199,8 @@ export function GlobalVideoPlayer() {
   const expandFromFloating = useCallback(() => {
     if (!currentVideo) return;
     expandVideoPlayer();
+    // Return to the tab the video belongs to rather than reloading it here.
+    if (focusTabForVideo(currentVideo.id)) return;
     navigate(`/watch/${currentVideo.id}`);
   }, [currentVideo, expandVideoPlayer, navigate]);
 

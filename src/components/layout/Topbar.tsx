@@ -12,6 +12,7 @@ import { SETTINGS } from '../../lib/settings/schema';
 import { getString } from '../../lib/i18n/index';
 import { toggleDeepFlow } from '../../lib/deepFlow';
 import { NotificationsBell } from '../notifications/NotificationsBell';
+import { selectActiveTab, useTabsStore } from '../../store/useTabsStore';
 
 export function Topbar() {
   const toggleSidebar = useUiStore((s) => s.toggleSidebar);
@@ -24,6 +25,11 @@ export function Topbar() {
   const [resolving, setResolving] = useState(false);
   const navigate = useNavigate();
   const location = useLocation();
+  // Back and forward walk the active tab's own history, not the window's.
+  const goBack = useTabsStore((s) => s.goBack);
+  const goForward = useTabsStore((s) => s.goForward);
+  const canGoBack = useTabsStore((s) => selectActiveTab(s).back.length > 0);
+  const canGoForward = useTabsStore((s) => selectActiveTab(s).forward.length > 0);
   const suggestionRef = useRef<HTMLDivElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const showAppLogo = useAppSettingsStore((state) => state.values[SETTINGS.SHOW_APP_LOGO_ICON] !== 'false');
@@ -193,14 +199,16 @@ export function Topbar() {
         <div className="hidden ml-1 items-center sm:flex">
           <IconButton
             title="Back"
-            onClick={() => navigate(-1)}
+            onClick={goBack}
+            disabled={!canGoBack}
             className="text-chrome-zinc-300 hover:text-chrome-zinc-100"
           >
             <ArrowLeft />
           </IconButton>
           <IconButton
             title="Forward"
-            onClick={() => navigate(1)}
+            onClick={goForward}
+            disabled={!canGoForward}
             className="text-chrome-zinc-300 hover:text-chrome-zinc-100"
           >
             <ArrowRight />

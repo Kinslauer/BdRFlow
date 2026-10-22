@@ -18,6 +18,7 @@ import type { VideoSummary } from "./types/video";
 
 import { PageWrapper } from "./components/layout/PageWrapper";
 import { TitleBar } from "./components/layout/TitleBar";
+import { TabsController } from "./components/tabs/TabsController";
 
 import Home from "./pages/Home";
 import MusicHome from "./pages/music/MusicHome";
@@ -150,7 +151,8 @@ function App() {
   return (
     <div style={windowLayoutStyle} className="relative flex h-screen flex-col overflow-hidden bg-background text-chrome-zinc-100 font-sans">
       <ThemeController />
-      <TitleBar />
+      <TitleBar showTabs={location.pathname !== "/onboarding"} />
+      <TabsController />
       <div className="relative min-h-0 flex-1">
       <Routes>
         <Route path="/onboarding" element={<Onboarding />} />

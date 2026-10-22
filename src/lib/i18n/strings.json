@@ -1463,5 +1463,14 @@
   "persona_reset_keep": "Keep Profile",
   "persona_reset_confirm": "Reset",
   "persona_reset_success": "Recommendation engine reset.",
-  "persona_reset_failed": "Reset failed."
+  "persona_reset_failed": "Reset failed.",
+  "tabs_new_tab": "New tab",
+  "tabs_home": "Home",
+  "tabs_video": "Video",
+  "tabs_search": "Search",
+  "tabs_close": "Close tab",
+  "tabs_close_others": "Close other tabs",
+  "tabs_duplicate": "Duplicate tab",
+  "tabs_reopen_closed": "Reopen closed tab",
+  "tabs_open_in_new_tab": "Open in new tab"
 }
