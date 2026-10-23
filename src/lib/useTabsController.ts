@@ -29,17 +29,26 @@ export function useTabsController() {
   onboardingRef.current = onboarding;
   const navigationTypeRef = useRef(navigationType);
   navigationTypeRef.current = navigationType;
+  // react-router hands out a new `navigate` on every location change. Depending
+  // on it would re-run the store → router effect right after each page change,
+  // before the change was recorded on the tab, and send the router back to the
+  // tab's old page — which then got recorded, and so on: a navigation loop.
+  const navigateRef = useRef(navigate);
+  navigateRef.current = navigate;
   const restoredRef = useRef(false);
   const restoreTargetRef = useRef<string | null>(null);
+  const lastStoreRef = useRef({ activeId, activePath });
 
-  // Store → router. Declared before the router → store effect so that, on the
-  // first render, the restore below runs before this would navigate.
-  // Depends on the store only: reading the location through a ref keeps a page
-  // navigation from being mistaken for a tab switch.
+  // Store → router: only when a tab action changed the store (switch, close,
+  // back, forward). Recordings of the router's own location are pre-marked in
+  // lastStoreRef below, so they never navigate.
   useEffect(() => {
+    const last = lastStoreRef.current;
+    if (last.activeId === activeId && last.activePath === activePath) return;
+    lastStoreRef.current = { activeId, activePath };
     if (!restoredRef.current || onboardingRef.current) return;
-    if (activePath !== currentPathRef.current) navigate(activePath, { replace: true });
-  }, [activeId, activePath, navigate]);
+    if (activePath !== currentPathRef.current) navigateRef.current(activePath, { replace: true });
+  }, [activeId, activePath]);
 
   // Router → store. Depends on the location only, reading the store fresh, so a
   // tab switch (which changes the store first) is never recorded onto the new tab.
@@ -67,14 +76,19 @@ export function useTabsController() {
       // one instead of overwriting it with the home page.
       if (currentPath === HOME_PATH && storedPath !== HOME_PATH) {
         restoreTargetRef.current = storedPath;
-        navigate(storedPath, { replace: true });
+        navigateRef.current(storedPath, { replace: true });
         return;
       }
     }
 
     if (currentPath === storedPath) return;
+    // Mark the store change this causes as already applied, so the store →
+    // router effect never treats our own recording as a tab switch. Without
+    // this, a second navigation landing before the re-render (a player's
+    // replace right after a push) would be undone.
+    lastStoreRef.current = { activeId: tabs.activeId, activePath: currentPath };
     tabs.recordNavigation(currentPath, navigationTypeRef.current === "PUSH" ? "push" : "replace");
-  }, [currentPath, location.pathname, navigate]);
+  }, [currentPath, location.pathname]);
 
   // Title of the active tab, once the router is actually showing it.
   const { text } = useResolvedWindowTitle();
