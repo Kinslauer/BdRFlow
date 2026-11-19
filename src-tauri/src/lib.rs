@@ -198,7 +198,7 @@ pub fn run() {
     #[cfg(desktop)]
     {
         builder = builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
-            if let Some(window) = app.get_webview_window("main") {
+            if let Some(window) = app.get_window("main") {
                 let _ = window.unminimize();
                 let _ = window.show();
                 let _ = window.set_focus();
@@ -410,7 +410,7 @@ pub fn run() {
                 use tauri_plugin_deep_link::DeepLinkExt;
                 let handle = app.handle().clone();
                 app.deep_link().on_open_url(move |_event| {
-                    if let Some(window) = handle.get_webview_window("main") {
+                    if let Some(window) = handle.get_window("main") {
                         let _ = window.unminimize();
                         let _ = window.show();
                         let _ = window.set_focus();
@@ -549,6 +549,15 @@ pub fn run() {
             updates_supported,
             set_player_fullscreen,
             commands::window::set_window_background,
+            // --- Web browser tabs ---
+            commands::browser::browser_show,
+            commands::browser::browser_navigate,
+            commands::browser::browser_set_bounds,
+            commands::browser::browser_hide,
+            commands::browser::browser_close,
+            commands::browser::browser_retain,
+            commands::browser::browser_reload,
+            commands::browser::browser_stop,
             // --- Pop-out (picture-in-picture) player window ---
             open_pip_window,
             pip_session,

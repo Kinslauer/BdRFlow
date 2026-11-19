@@ -4,6 +4,8 @@ import { useTranslation } from "react-i18next";
 import { usePlayerStore } from "../store/usePlayerStore";
 import { useMusicPlayerStore } from "../store/useMusicPlayerStore";
 import { usePageTitleStore } from "../store/usePageTitleStore";
+import { selectActiveTab, useTabsStore } from "../store/useTabsStore";
+import { displayHost, urlFromBrowsePath } from "./browserUrl";
 
 // Static section labels keyed by exact pathname. Rendered as spaced-out uppercase
 // "section" chrome; dynamic content titles (video/song/channel/search/…) render in
@@ -44,6 +46,8 @@ export function useResolvedWindowTitle(): ResolvedTitle {
     (s) => s.currentTrack !== null && s.viewState !== "dock"
   );
   const override = usePageTitleStore((s) => (s.path === pathname ? s.title : null));
+  // Web pages report their title onto their tab (see `handleBrowserState`).
+  const browserTitle = useTabsStore((s) => (pathname === "/browse" ? selectActiveTab(s).title : ""));
 
   return useMemo<ResolvedTitle>(() => {
     // The full-screen music player renders above the titlebar → show the track.
@@ -65,6 +69,13 @@ export function useResolvedWindowTitle(): ResolvedTitle {
       return q ? { text: q, section: false } : { text: t("search"), section: true };
     }
 
+    // Browser tab → the web page's title, or its host until it has one.
+    if (pathname === "/browse") {
+      const url = urlFromBrowsePath(pathname + search);
+      if (browserTitle) return { text: browserTitle, section: false };
+      return url ? { text: displayHost(url), section: false } : { text: t("newTab"), section: false };
+    }
+
     // Channel / artist / album / playlist titles are published by their pages.
     if (override) return { text: override, section: false };
 
@@ -75,6 +86,6 @@ export function useResolvedWindowTitle(): ResolvedTitle {
 
     // Dynamic routes before their page has published a title yet — stay blank.
     return { text: "", section: false };
-  }, [t, pathname, search, musicOverlayOpen, trackTitle, currentVideoId, currentVideoTitle, override]);
+  }, [t, pathname, search, musicOverlayOpen, trackTitle, currentVideoId, currentVideoTitle, override, browserTitle]);
 }
 

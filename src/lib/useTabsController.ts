@@ -4,13 +4,16 @@ import { HOME_PATH, selectActiveTab, useTabsStore } from "../store/useTabsStore"
 import { useMusicPlayerStore } from "../store/useMusicPlayerStore";
 import { useResolvedWindowTitle } from "./useResolvedWindowTitle";
 import { closeActiveBrowserTab, settlePendingDismiss } from "./tabs";
+import { isBrowsePath } from "./browserUrl";
+import { FOCUS_ADDRESS_BAR_EVENT, openWebTab } from "./browserTabs";
 
 const isOnboardingPath = (pathname: string) => pathname.startsWith("/onboarding");
 
 /**
  * Keeps the router and the active tab in step (see `useTabsStore`), keeps tab
  * titles current, and handles the browser shortcuts: Ctrl+T, Ctrl+W,
- * Ctrl+Shift+T, Ctrl+Tab, Ctrl+1…9, Alt+←/→ and the mouse back/forward buttons.
+ * Ctrl+Shift+T, Ctrl+Tab, Ctrl+1…9, Alt+←/→, the mouse back/forward buttons, and
+ * Ctrl+L (the web address bar, opening a browser tab if this isn't one).
  */
 export function useTabsController() {
   const location = useLocation();
@@ -120,6 +123,10 @@ export function useTabsController() {
       if (lower === "t" && event.shiftKey) tabs.reopenClosedTab();
       else if (lower === "t") tabs.openTab(HOME_PATH, { activate: true });
       else if (lower === "w" && !event.shiftKey) closeActiveBrowserTab();
+      else if (lower === "l" && !event.shiftKey) {
+        if (isBrowsePath(selectActiveTab(tabs).path)) window.dispatchEvent(new Event(FOCUS_ADDRESS_BAR_EVENT));
+        else openWebTab();
+      }
       else if (key === "Tab") tabs.cycleTab(event.shiftKey ? -1 : 1);
       else if (key === "PageDown" && !event.shiftKey) tabs.cycleTab(1);
       else if (key === "PageUp" && !event.shiftKey) tabs.cycleTab(-1);

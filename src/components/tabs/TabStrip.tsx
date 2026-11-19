@@ -3,6 +3,8 @@ import { Clapperboard, Compass, Globe, Music, Plus, Search, Volume2, X } from "l
 import { HOME_PATH, useTabsStore, watchIdFromTabPath, type BrowserTab } from "../../store/useTabsStore";
 import { usePlayerStore } from "../../store/usePlayerStore";
 import { closeBrowserTab, closeOtherBrowserTabs } from "../../lib/tabs";
+import { openWebTab } from "../../lib/browserTabs";
+import { displayHost, isBrowsePath, urlFromBrowsePath } from "../../lib/browserUrl";
 import { getString } from "../../lib/i18n/index";
 import { AnchoredPortalMenu, type MenuAnchor } from "../ui/AnchoredPortalMenu";
 
@@ -14,6 +16,10 @@ function fallbackTitle(path: string) {
   if (path === HOME_PATH) return getString("tabs_home");
   if (watchIdFromTabPath(path)) return getString("tabs_video");
   if (path.startsWith("/search")) return getString("tabs_search");
+  if (isBrowsePath(path)) {
+    const url = urlFromBrowsePath(path);
+    return url ? displayHost(url) : getString("tabs_new_browser_tab");
+  }
   return getString("tabs_new_tab");
 }
 
@@ -184,6 +190,15 @@ export function TabStrip() {
         className="pointer-events-auto mb-[3px] grid h-[22px] w-[22px] shrink-0 place-items-center self-end rounded-md text-on-surface-variant transition-colors hover:bg-on-surface/10 hover:text-on-surface"
       >
         <Plus size={14} strokeWidth={2.25} />
+      </button>
+      <button
+        type="button"
+        aria-label={getString("tabs_new_browser_tab")}
+        title={`${getString("tabs_new_browser_tab")} (Ctrl+L)`}
+        onClick={() => openWebTab()}
+        className="pointer-events-auto mb-[3px] grid h-[22px] w-[22px] shrink-0 place-items-center self-end rounded-md text-on-surface-variant transition-colors hover:bg-on-surface/10 hover:text-on-surface"
+      >
+        <Globe size={14} strokeWidth={2.25} />
       </button>
 
       {menu && menuTab ? (

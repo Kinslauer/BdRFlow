@@ -1473,6 +1473,7 @@ dependencies = [
  "discord-rich-presence",
  "flate2",
  "futures-util",
+ "gtk",
  "hkdf",
  "hmac",
  "icu_properties",

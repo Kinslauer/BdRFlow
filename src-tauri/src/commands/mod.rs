@@ -1,4 +1,5 @@
 pub mod backup;
+pub mod browser;
 pub mod db;
 pub mod diagnostics;
 pub mod discord;

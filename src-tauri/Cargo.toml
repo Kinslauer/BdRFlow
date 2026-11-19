@@ -16,7 +16,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["unstable"] }
 tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-os = "2"
@@ -103,6 +103,8 @@ tauri-plugin-window-state = "2"
 rust-ini = "=0.21.1"
 # The version wry uses, for the web-process-terminated signal (src/web_process.rs).
 webkit2gtk = { version = "=2.0.2", features = ["v2_20"] }
+# The version wry uses, to lay out browser-tab webviews (src/commands/browser.rs).
+gtk = "0.18"
 
 [profile.release]
 # Keep production binaries compact without sacrificing the normal release optimizer.

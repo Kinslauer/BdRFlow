@@ -49,6 +49,12 @@ interface TabsState {
   moveTab: (fromIndex: number, toIndex: number) => void;
   /** Record a navigation that already happened in the router, on the active tab. */
   recordNavigation: (path: string, kind: "push" | "replace") => void;
+  /**
+   * Record a navigation on any tab, active or not. Browser tabs use this for
+   * navigations that happen inside the page; for the active tab the controller
+   * then moves the router to match.
+   */
+  recordTabNavigation: (id: string, path: string, kind: "push" | "replace", title?: string) => void;
   setTitle: (id: string, title: string) => void;
   goBack: () => void;
   goForward: () => void;
@@ -206,14 +212,18 @@ export const useTabsStore = create<TabsState>()((set, get) => ({
   },
 
   recordNavigation: (path, kind) => {
+    get().recordTabNavigation(get().activeId, path, kind);
+  },
+
+  recordTabNavigation: (id, path, kind, title = "") => {
     set((state) => ({
-      tabs: updateTab(state.tabs, state.activeId, (tab) => {
+      tabs: updateTab(state.tabs, id, (tab) => {
         if (tab.path === path) return tab;
-        if (kind === "replace") return { ...tab, path, title: "" };
+        if (kind === "replace") return { ...tab, path, title };
         return {
           ...tab,
           path,
-          title: "",
+          title,
           back: capped([...tab.back, tab.path]),
           forward: [],
         };

@@ -75,7 +75,7 @@ impl PipState {
 /// pop-out lands where the user is looking and clears the taskbar/dock.
 fn pip_origin<R: Runtime>(app: &AppHandle<R>) -> Option<(f64, f64)> {
     let monitor = app
-        .get_webview_window("main")
+        .get_window("main")
         .and_then(|window| window.current_monitor().ok().flatten())
         .or_else(|| app.primary_monitor().ok().flatten())?;
 
@@ -234,7 +234,7 @@ pub fn pip_window_ready<R: Runtime>(app: AppHandle<R>) -> Result<(), ErrorRespon
 /// Raises the main window when the pop-out hands playback back to it.
 #[tauri::command]
 pub fn focus_main_window<R: Runtime>(app: AppHandle<R>) -> Result<(), ErrorResponse> {
-    if let Some(window) = app.get_webview_window("main") {
+    if let Some(window) = app.get_window("main") {
         let _ = window.unminimize();
         let _ = window.show();
         let _ = window.set_focus();

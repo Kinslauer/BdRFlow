@@ -14,7 +14,7 @@ pub fn install_close_handler(window: &WebviewWindow) {
 }
 
 pub fn reopen(app: &AppHandle) {
-    if let Some(window) = app.get_webview_window("main") {
+    if let Some(window) = app.get_window("main") {
         if let Err(error) = window
             .unminimize()
             .and_then(|()| window.show())
