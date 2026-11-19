@@ -1,5 +1,10 @@
 import type { YTItem } from '../types/music';
 
+/** Whether `path` is one of the Music pages, which only the main window shows. */
+export function isMusicRoute(path: string): boolean {
+  return path === '/music' || path.startsWith('/music/') || path.startsWith('/music?');
+}
+
 /**
  * Destination for a shelf's "see all" endpoint, chosen by browse-id page type:
  * albums, playlists and artists have dedicated pages; everything else (moods,
@@ -21,4 +26,9 @@ export function musicSeeAllRoute(
   }
   const query = new URLSearchParams({ browseId, ...(params ? { params } : {}), title });
   return `/music/browse?${query}`;
+}
+
+/** Music downloads are all "album" records, but a YouTube Music playlist only opens on its own page. */
+export function downloadedMusicCollectionPath(collectionId: string): string {
+  return /^(PL|RD|VL)/.test(collectionId) ? `/music/playlist/${collectionId}` : `/music/album/${collectionId}`;
 }

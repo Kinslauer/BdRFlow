@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   Ban,
@@ -9,13 +9,13 @@ import {
   EyeOff,
   MoreVertical,
   Play,
-  type LucideIcon,
 } from "lucide-react";
-import { AnchoredPortalMenu, type MenuAnchor } from "../ui/AnchoredPortalMenu";
-import { useAppSettingsStore } from "../../store/useAppSettingsStore";
+import type { MenuAnchor } from "../ui/AnchoredPortalMenu";
+import { MediaMenu } from "../ui/MediaMenu";
+import { useDownloadStore } from "../../store/useDownloadStore";
 import { useFeedActionsStore } from "../../store/useFeedActionsStore";
 import { useUiStore } from "../../store/useUiStore";
-import { SETTINGS } from "../../lib/settings/schema";
+import { showSaveFailedToast, showSaveToast } from "../../lib/saveToast";
 import { buildShortQueue, shortSummaryToItem } from "../../lib/shortsQueue";
 import { prefetchStreamInfo } from "../../lib/streamResolution";
 import {
@@ -23,19 +23,27 @@ import {
   removeShortFromLibrary,
   saveShortToLibrary,
 } from "../../lib/savedShortsLibrary";
+import { dontRecommendLabel } from "../../lib/dontRecommendLabel";
 import { getString } from "../../lib/i18n/index";
 import { youtubeShortsUrl } from "../../lib/youtubeUrl";
 import { copyText } from "../../lib/clipboard";
 import { useProxyImageSrc } from "../../lib/useImageProxy";
 import type { ShortVideoSummary, VideoSummary } from "../../types/video";
+import { backgroundTabClickProps, openedInBackgroundTab } from "../../lib/openTarget";
+import { openActions } from "../common/openActions";
+import { useOriginalTitle } from "../../lib/useOriginalTitle";
+import { useShortsPlayerDisabled } from "../../lib/useShortsContent";
+import { alignToEnd, growFromPoint } from "../../lib/direction";
 
 interface ShortCardProps {
   short: ShortVideoSummary;
   queue: ShortVideoSummary[];
   variant?: "shelf" | "grid";
+  /** The player stops at the end of `queue` instead of continuing into the feed: Saved Shorts. */
+  finiteQueue?: boolean;
 }
 
-export function ShortCard({ short, queue, variant = "grid" }: ShortCardProps) {
+export function ShortCard({ short, queue, variant = "grid", finiteQueue = false }: ShortCardProps) {
   const navigate = useNavigate();
   const toSrc = useProxyImageSrc();
   const showToast = useUiStore((s) => s.showToast);
@@ -43,10 +51,10 @@ export function ShortCard({ short, queue, variant = "grid" }: ShortCardProps) {
   const blockChannelAction = useFeedActionsStore((s) => s.blockChannel);
   const [menuAnchor, setMenuAnchor] = useState<MenuAnchor | null>(null);
   const [savedToLibrary, setSavedToLibrary] = useState(false);
-  const disableShortsPlayer = useAppSettingsStore(
-    (state) => state.values[SETTINGS.DISABLE_SHORTS_PLAYER] === "true",
-  );
-  const title = short.title?.trim() || "Short";
+  const disableShortsPlayer = useShortsPlayerDisabled();
+  const cardRef = useRef<HTMLDivElement>(null);
+  const originalTitle = useOriginalTitle(short.id, cardRef);
+  const title = originalTitle || short.title?.trim() || getString('shorts_short');
   const video = useMemo<VideoSummary>(
     () => ({
       id: short.id,
@@ -76,7 +84,9 @@ export function ShortCard({ short, queue, variant = "grid" }: ShortCardProps) {
     };
   }, [short.id]);
 
-  const playShort = () => {
+  const shortRoute = disableShortsPlayer ? `/watch/${short.id}` : `/shorts/${short.id}`;
+  const playShort = (event: React.MouseEvent) => {
+    if (openedInBackgroundTab(event, shortRoute)) return;
     // Resolution starts on the click rather than after the route has changed and
     // the player has mounted; the surface that plays it joins this request.
     prefetchStreamInfo(short.id);
@@ -89,7 +99,7 @@ export function ShortCard({ short, queue, variant = "grid" }: ShortCardProps) {
       state: {
         initialShort: shortSummaryToItem(short),
         initialQueue: buildShortQueue(queue),
-        queueOnly: true,
+        queueEnd: finiteQueue ? "stop" : "feed",
       },
     });
   };
@@ -97,14 +107,14 @@ export function ShortCard({ short, queue, variant = "grid" }: ShortCardProps) {
   const openContextMenu = (event: React.MouseEvent) => {
     event.preventDefault();
     event.stopPropagation();
-    setMenuAnchor({ top: event.clientY, left: event.clientX });
+    setMenuAnchor({ top: event.clientY, ...growFromPoint(event.clientX) });
   };
 
   const openMenuFromDots = (event: React.MouseEvent) => {
     event.preventDefault();
     event.stopPropagation();
     const rect = event.currentTarget.getBoundingClientRect();
-    setMenuAnchor({ top: rect.bottom + 4, right: rect.right });
+    setMenuAnchor({ top: rect.bottom + 4, ...alignToEnd(rect) });
   };
 
   const copyLink = async () => {
@@ -118,20 +128,37 @@ export function ShortCard({ short, queue, variant = "grid" }: ShortCardProps) {
 
   const toggleSavedShort = async () => {
     setMenuAnchor(null);
+    const removing = savedToLibrary;
+    const item = { title, image: short.thumbnailUrl, shape: "portrait" as const };
     try {
-      if (savedToLibrary) {
+      if (removing) {
         await removeShortFromLibrary(short.id);
         setSavedToLibrary(false);
-        showToast({ variant: "success", message: getString("shorts_removed_from_library") });
+        showSaveToast({
+          destination: { kind: "savedShorts" },
+          item,
+          removed: true,
+          undo: async () => {
+            await saveShortToLibrary({ ...short, title });
+            setSavedToLibrary(true);
+          },
+        });
         return;
       }
 
       await saveShortToLibrary({ ...short, title });
       setSavedToLibrary(true);
-      showToast({ variant: "success", message: getString("shorts_saved_to_library") });
+      showSaveToast({
+        destination: { kind: "savedShorts" },
+        item,
+        undo: async () => {
+          await removeShortFromLibrary(short.id);
+          setSavedToLibrary(false);
+        },
+      });
     } catch (error) {
       console.error("Failed to update saved Shorts", error);
-      showToast({ variant: "error", message: getString("shorts_save_failed") });
+      showSaveFailedToast({ destination: { kind: "savedShorts" }, item, removed: removing, retry: toggleSavedShort });
     }
   };
 
@@ -150,20 +177,21 @@ export function ShortCard({ short, queue, variant = "grid" }: ShortCardProps) {
 
   const downloadShort = () => {
     setMenuAnchor(null);
-    showToast({ variant: "info", message: getString("shorts_download_coming_soon") });
+    useDownloadStore.getState().openVideo(video);
   };
 
   const isShelf = variant === "shelf";
 
   return (
     <div
+      ref={cardRef}
       onContextMenu={openContextMenu}
       className={[
-        "group relative flex shrink-0 flex-col gap-2 text-left",
+        "group relative flex shrink-0 flex-col gap-2 text-start",
         isShelf ? "w-[140px] sm:w-[176px]" : "w-full",
       ].join(" ")}
     >
-      <button type="button" onClick={playShort} className="flex w-full flex-col gap-2 text-left">
+      <button type="button" onClick={playShort} {...backgroundTabClickProps(shortRoute)} className="flex w-full flex-col gap-2 text-start">
         <span className="relative block aspect-[9/16] w-full overflow-hidden rounded-xl border border-chrome-neutral-800 bg-surface-container">
           {short.thumbnailUrl && (
             <img
@@ -179,13 +207,13 @@ export function ShortCard({ short, queue, variant = "grid" }: ShortCardProps) {
             </span>
           </span>
           {short.viewCountText && (
-            <span className="absolute bottom-2 left-2 rounded bg-chrome-black/70 px-1.5 py-0.5 text-[11px] font-bold tracking-wide text-chrome-white">
+            <span className="absolute bottom-2 start-2 rounded bg-chrome-black/70 px-1.5 py-0.5 text-[11px] font-bold tracking-wide text-chrome-white">
               {short.viewCountText}
             </span>
           )}
         </span>
 
-        <span
+        <span dir="auto"
           className={[
             "line-clamp-2 font-semibold leading-tight text-chrome-neutral-100 transition-colors group-hover:text-primary",
             isShelf ? "text-xs" : "text-sm",
@@ -199,52 +227,70 @@ export function ShortCard({ short, queue, variant = "grid" }: ShortCardProps) {
         type="button"
         aria-label={getString("more_options")}
         onClick={openMenuFromDots}
-        className="absolute right-2 top-2 z-10 grid h-8 w-8 place-items-center rounded-full border border-chrome-white/15 bg-chrome-black/80 text-chrome-white opacity-0 transition-colors hover:bg-chrome-black group-hover:opacity-100"
+        className="absolute end-2 top-2 z-10 grid h-8 w-8 place-items-center rounded-full border border-chrome-white/15 bg-chrome-black/80 text-chrome-white opacity-0 transition-colors hover:bg-chrome-black group-hover:opacity-100"
       >
         <MoreVertical className="h-4 w-4" />
       </button>
 
       {menuAnchor && (
-        <AnchoredPortalMenu
+        <MediaMenu
           anchor={menuAnchor}
           onClose={() => setMenuAnchor(null)}
-          className="z-50 w-64 overflow-hidden rounded-xl border border-chrome-neutral-800 bg-surface-container-high py-1"
-        >
-          <MenuItem icon={savedToLibrary ? BookmarkCheck : Bookmark} onClick={() => void toggleSavedShort()}>
-            {getString(savedToLibrary ? "shorts_menu_remove_from_library" : "shorts_menu_save_to_library")}
-          </MenuItem>
-          <MenuItem icon={Download} onClick={downloadShort}>{getString("shorts_menu_download")}</MenuItem>
-          <MenuItem icon={Ban} onClick={notInterested}>{getString("shorts_menu_not_interested")}</MenuItem>
-          {short.channelId && (
-            <MenuItem icon={EyeOff} onClick={dontRecommendChannel}>
-              {getString("shorts_menu_dont_recommend_channel")}
-            </MenuItem>
-          )}
-          <MenuItem icon={Copy} onClick={copyLink}>{getString("shorts_menu_copy_link")}</MenuItem>
-        </AnchoredPortalMenu>
+          header={{
+            title,
+            subtitle: short.channelName,
+            image: short.thumbnailUrl ? toSrc(short.thumbnailUrl) : null,
+            imageShape: "portrait",
+          }}
+          actions={[
+            {
+              id: "save",
+              label: getString(savedToLibrary ? "shorts_menu_remove_from_library" : "shorts_menu_save_to_library"),
+              tileLabel: getString(savedToLibrary ? "menu_tile_saved" : "menu_tile_save"),
+              icon: savedToLibrary ? <BookmarkCheck size={18} /> : <Bookmark size={18} />,
+              group: "quick",
+              active: savedToLibrary,
+              onSelect: toggleSavedShort,
+            },
+            {
+              id: "download",
+              label: getString("shorts_menu_download"),
+              tileLabel: getString("menu_tile_download"),
+              icon: <Download size={18} />,
+              group: "quick",
+              onSelect: downloadShort,
+            },
+            ...openActions(shortRoute),
+            {
+              id: "copy-link",
+              label: getString("shorts_menu_copy_link"),
+              tileLabel: getString("menu_tile_copy_link"),
+              icon: <Copy size={18} />,
+              group: "quick",
+              onSelect: copyLink,
+            },
+            {
+              id: "not-interested",
+              label: getString("shorts_menu_not_interested"),
+              icon: <Ban size={16} />,
+              group: "feed",
+              danger: true,
+              onSelect: notInterested,
+            },
+            ...(short.channelId
+              ? [{
+                id: "block-channel",
+                label: dontRecommendLabel(short.channelName),
+                icon: <EyeOff size={16} />,
+                group: "feed" as const,
+                danger: true,
+                onSelect: dontRecommendChannel,
+              }]
+              : []),
+          ]}
+        />
       )}
     </div>
-  );
-}
-
-function MenuItem({
-  icon: Icon,
-  onClick,
-  children,
-}: {
-  icon: LucideIcon;
-  onClick: () => void;
-  children: ReactNode;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className="flex w-full items-center gap-3 px-3 py-2.5 text-left text-sm text-chrome-neutral-200 transition-colors hover:bg-surface-container-highest"
-    >
-      <Icon className="h-4 w-4 shrink-0 text-chrome-neutral-400" />
-      {children}
-    </button>
   );
 }
 

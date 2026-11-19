@@ -16,6 +16,7 @@ import type {
   MoodAndGenreItem,
   MoodAndGenreGroup,
   MoodGenrePage,
+  MusicLyrics,
   MusicHomePage,
   MusicTimeRotation,
   MusicPlaylistPage,
@@ -195,8 +196,8 @@ export function getMusicLinkedArtists(limit = 20): Promise<ArtistItem[]> {
   return invokeBackend<ArtistItem[]>("get_music_linked_artists", { limit });
 }
 
-export function getMusicLyricsTyped(videoId: string): Promise<string | null> {
-  return invokeBackend<string | null>("get_music_lyrics_typed", { videoId });
+export function getMusicLyricsTyped(videoId: string): Promise<MusicLyrics | null> {
+  return invokeBackend<MusicLyrics | null>("get_music_lyrics_typed", { videoId });
 }
 
 // --- Playback -------------------------------------------------------------
@@ -207,11 +208,13 @@ export function getMusicLyricsTyped(videoId: string): Promise<string | null> {
  * — feed it straight to an `<audio>` element. `loudnessDb` is for volume
  * normalization.
  */
+/** `preferAac` asks for AAC over Opus, for a retry after the element could not decode a track. */
 export function getMusicStream(
   videoId: string,
   audioQuality: MusicAudioQuality = "Auto",
+  preferAac = false,
 ): Promise<MusicStreamInfo> {
-  return invokeBackend<MusicStreamInfo>("get_music_stream", { videoId, audioQuality });
+  return invokeBackend<MusicStreamInfo>("get_music_stream", { videoId, audioQuality, preferAac });
 }
 
 // --- Music brain (dedicated, entity-based; separate from the video engine) -----
@@ -279,8 +282,18 @@ export function rankMusicCandidates(
 }
 
 /** Records a reversible dislike cooldown for an artist (a repeat dislike escalates to a block). */
+/** An artist picked by hand, or unpicked. Seeds the music taste only, never the video engine. */
+export function setFavouriteMusicArtist(artistId: string, artistName: string, favourite: boolean): Promise<void> {
+  return invokeBackend<void>("set_favourite_music_artist", { artistId, artistName, favourite });
+}
+
 export function dislikeMusicArtist(artistId: string | null, artistName: string): Promise<void> {
   return invokeBackend<void>("dislike_music_artist", { artistId, artistName });
+}
+
+/** Adds an artist to the favourites, without inventing plays. True when they were not one yet. */
+export function favouriteMusicArtist(artistId: string | null, artistName: string): Promise<boolean> {
+  return invokeBackend<boolean>("favourite_music_artist", { artistId, artistName });
 }
 
 /** Hard-blocks an artist ("don't recommend") — a permanent denylist across all music surfaces. */
@@ -301,6 +314,17 @@ export function getBlockedMusicArtists(): Promise<string[]> {
 /** Clears all learned music taste (and re-enables history backfill on next launch). */
 export function resetMusicBrain(): Promise<void> {
   return invokeBackend<void>("reset_music_brain");
+}
+
+export interface MusicArtistInsights {
+  plays: number;
+  liked: boolean;
+  topTracks: SongItem[];
+}
+
+/** Your own listening for one artist, or null when no play was ever counted. */
+export function getMusicArtistInsights(artistId: string | null, artistName: string): Promise<MusicArtistInsights | null> {
+  return invokeBackend<MusicArtistInsights | null>("get_music_artist_insights", { artistId, artistName });
 }
 
 export function getMusicTasteProfile(): Promise<MusicTasteProfile> {

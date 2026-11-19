@@ -1,6 +1,6 @@
+import { getString } from '../../lib/i18n/index';
 import { useMemo } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { useTranslation } from 'react-i18next';
 
 import { MusicItemCard } from '../../components/music/MusicItemCard';
 import { Button } from '../../components/ui/Button';
@@ -8,10 +8,10 @@ import { useMusicChipFilter } from '../../lib/useMusicHome';
 import { useGridStyle } from '../../lib/useGridColumns';
 import { useMusicPlayerStore } from '../../store/useMusicPlayerStore';
 import { useMusicArtistHidden, useMusicHiddenFilter } from '../../store/useMusicActionsStore';
+import { episodeAsSong } from '../../lib/searchResults';
 import type { SongItem, YTItem } from '../../types/music';
 
 export default function MusicBrowsePage() {
-  const { t } = useTranslation('common');
   const [params] = useSearchParams();
   const navigate = useNavigate();
   const gridStyle = useGridStyle({ density: 'dense' });
@@ -20,20 +20,37 @@ export default function MusicBrowsePage() {
   const isArtistHidden = useMusicArtistHidden();
   const browseId = params.get('browseId');
   const browseParams = params.get('params');
-  const title = params.get('title') || t('musicBrowse');
+  const title = params.get('title') || getString('music_browse');
   const chip = useMemo(() => browseId ? {
     title, browseId, params: browseParams, orderBy: 0,
   } : null, [browseId, browseParams, title]);
-  const { items, loading, loadingMore, error, reload, loadMore, hasMore } = useMusicChipFilter(chip);
-  const visible = items.filter((item) => item.type !== 'podcast' && item.type !== 'episode')
+  const { items, sections, loading, loadingMore, error, reload, loadMore, hasMore } = useMusicChipFilter(chip);
+  const shown = (list: YTItem[]) => list
     .filter((item) => item.type === 'song' ? !isHidden(item)
       : item.type === 'artist' ? !isArtistHidden(item) : true);
-  const audioSongs = visible.filter((item): item is Extract<YTItem, { type: 'song' }> =>
-    item.type === 'song' && (!item.musicVideoType || item.musicVideoType === 'MUSIC_VIDEO_TYPE_ATV'));
+  const visible = shown(items);
+  // Further pages continue the last shelf, so they follow the titled shelves untitled.
+  const sectioned = sections.length > 1;
+  const sectionedCount = sections.reduce((count, section) => count + section.items.length, 0);
+  const moreItems = sectioned ? shown(items.slice(sectionedCount)) : [];
+  const audioSongs = visible.flatMap((item): SongItem[] => {
+    if (item.type === 'song') {
+      return (!item.musicVideoType || item.musicVideoType === 'MUSIC_VIDEO_TYPE_ATV') ? [item] : [];
+    }
+    if (item.type === 'episode') {
+      return [episodeAsSong(item)];
+    }
+    return [];
+  });
   const play = (song: SongItem) => {
     const index = audioSongs.findIndex((item) => (item.videoId ?? item.id) === (song.videoId ?? song.id));
     void playQueue(audioSongs, Math.max(0, index), title);
   };
+  const itemKey = (item: YTItem, index: number) => item.type === 'album' ? item.browseId
+    : 'id' in item ? item.id : index;
+  const renderGrid = (list: YTItem[]) => <div className="flow-grid gap-y-6" style={gridStyle}>
+    {list.map((item, index) => <div key={itemKey(item, index)}>{renderItem(item)}</div>)}
+  </div>;
   const renderItem = (item: YTItem) => {
     switch (item.type) {
       case 'song':
@@ -53,26 +70,42 @@ export default function MusicBrowsePage() {
       case 'artist':
         return <MusicItemCard variant="artist" item={item} fill
           onOpen={() => navigate(`/music/artist/${item.id}`)} />;
+      case 'podcast':
+        return <MusicItemCard variant="podcast" item={item} fill
+          onPlay={() => navigate(`/music/playlist/${item.id}`)}
+          onOpen={() => navigate(`/music/playlist/${item.id}`)} />;
+      case 'episode': {
+        const asSong = episodeAsSong(item);
+        return <MusicItemCard variant="episode" item={item} fill
+          onPlay={() => play(asSong)}
+          onOpen={() => play(asSong)} />;
+      }
       default:
         return null;
     }
   };
 
   return <main className="px-6 py-8 lg:px-8">
-    <h1 className="mb-6 text-3xl font-bold tracking-tight text-chrome-neutral-100">{title}</h1>
+    <h1 dir="auto" className="mb-6 text-3xl font-bold tracking-tight text-chrome-neutral-100">{title}</h1>
     {error && <div className="mb-6 flex items-center gap-3 text-sm text-chrome-neutral-400">
-      <span>{error}</span><Button variant="secondary" onClick={reload}>{t('musicRetry')}</Button>
+      <span>{error}</span><Button variant="secondary" onClick={reload}>{getString('music_retry')}</Button>
     </div>}
     {loading && !visible.length ? <div className="flow-grid gap-y-6" style={gridStyle}>
       {Array.from({ length: 12 }).map((_, index) => <div key={index}
         className="aspect-square animate-pulse rounded-xl bg-surface-container-low" />)}
-    </div> : <div className="flow-grid gap-y-6" style={gridStyle}>
-      {visible.map((item, index) => <div key={item.type === 'album' ? item.browseId
-        : 'id' in item ? item.id : index}>{renderItem(item)}</div>)}
-    </div>}
-    {!loading && !error && !visible.length && <p className="py-20 text-center text-sm text-chrome-neutral-400">{t('musicChipEmpty')}</p>}
+    </div> : sectioned ? <div className="flex flex-col gap-10">
+      {sections.map((section, index) => {
+        const list = shown(section.items);
+        return list.length > 0 ? <section key={`${index}:${section.title}`}>
+          <h2 dir="auto" className="mb-4 text-xl font-bold tracking-tight text-chrome-neutral-100">{section.title}</h2>
+          {renderGrid(list)}
+        </section> : null;
+      })}
+      {moreItems.length > 0 && renderGrid(moreItems)}
+    </div> : renderGrid(visible)}
+    {!loading && !error && !visible.length && <p className="py-20 text-center text-sm text-chrome-neutral-400">{getString('music_chip_empty')}</p>}
     {hasMore && <div className="flex justify-center py-8">
-      <Button variant="secondary" disabled={loadingMore} onClick={() => void loadMore()}>{t('musicLoadMore')}</Button>
+      <Button variant="secondary" disabled={loadingMore} onClick={() => void loadMore()}>{getString('music_load_more')}</Button>
     </div>}
   </main>;
 }

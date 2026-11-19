@@ -1,4 +1,6 @@
 import { Maximize2, Pin, PinOff, X } from "lucide-react";
+import { useProfileSwitchListener } from "../../lib/profiles/useProfileSwitchListener";
+import { useOtherWindowSettings } from "../../lib/useOtherWindowSettings";
 
 import { IS_MACOS_RUNTIME } from "../../lib/platform";
 import { useNativeWindowTitle } from "../../lib/useNativeWindowTitle";
@@ -6,12 +8,15 @@ import { getString } from "../../lib/i18n/index";
 import { usePipSession } from "../../lib/usePipSession";
 import { usePipWindowAspectLock } from "../../lib/usePipWindowAspectLock";
 import { useMediaSessionMetadata } from "../../lib/useMediaSessionMetadata";
+import { useMediaCommands } from "../../lib/useMediaCommands";
+import { useMusicTray } from "../../lib/useMusicTray";
 import { usePlayerStore } from "../../store/usePlayerStore";
 import { WindowResizeEdges } from "../ui/WindowResizeEdges";
 import { FlowPlayerCore } from "../watch/FlowPlayerCore";
+import { useCanPinWindows } from "../../lib/graphicsReport";
 
 const chromeButton =
-  "grid h-7 w-7 shrink-0 place-items-center rounded-full text-chrome-white/90 transition-colors hover:bg-chrome-white/15 hover:text-chrome-white";
+  "grid h-7 w-7 shrink-0 place-items-center rounded-full text-chrome-white/90 transition-colors hover:bg-chrome-white/15 hover:text-chrome-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary";
 
 /**
  * Root of the pop-out player window — a real top-level OS window that can be
@@ -22,7 +27,10 @@ const chromeButton =
 export function PipWindowApp() {
   const { status, alwaysOnTop, toggleAlwaysOnTop, returnToMainWindow, closeWindow } =
     usePipSession();
+  const canPin = useCanPinWindows();
   usePipWindowAspectLock();
+  useProfileSwitchListener();
+  useOtherWindowSettings();
 
   const currentVideo = usePlayerStore((s) => s.currentVideo);
   useNativeWindowTitle(currentVideo?.title ?? getString("pip_window_title"));
@@ -30,6 +38,8 @@ export function PipWindowApp() {
   // This window holds the media element while it is open, so it also owns the
   // OS transport controls.
   useMediaSessionMetadata(isPlaying);
+  useMediaCommands();
+  useMusicTray();
 
   return (
     <div className="group relative flex h-screen w-screen items-center justify-center overflow-hidden bg-chrome-black text-chrome-zinc-100">
@@ -65,50 +75,58 @@ export function PipWindowApp() {
       )}
 
       {/* macOS uses its native title bar; other platforms need a drag handle. */}
-      <div className="absolute inset-x-0 top-0 z-[250] flex h-9 items-center gap-1 px-2 opacity-0 transition-opacity duration-200 ease-out group-hover:opacity-100">
+      <div className="absolute inset-x-0 top-0 z-[250] flex h-9 items-center gap-1 px-2 opacity-0 transition-opacity duration-200 ease-out focus-within:opacity-100 group-hover:opacity-100">
         <div
           data-tauri-drag-region={IS_MACOS_RUNTIME ? undefined : true}
           className="flex h-full min-w-0 flex-1 items-center rounded-lg px-2"
         >
           {!IS_MACOS_RUNTIME && (
-            <span className="pointer-events-none truncate text-xs font-medium text-chrome-white">
+            <span
+              dir="auto"
+              className="pointer-events-none truncate rounded-full bg-chrome-black/80 px-2.5 py-1 text-xs font-medium text-chrome-white"
+            >
               {currentVideo?.title ?? getString("pip_window_title")}
             </span>
           )}
         </div>
-        <button
-          type="button"
-          aria-label={
-            alwaysOnTop ? getString("pip_window_unpin") : getString("pip_window_pin")
-          }
-          title={alwaysOnTop ? getString("pip_window_unpin") : getString("pip_window_pin")}
-          onClick={toggleAlwaysOnTop}
-          className={
-            alwaysOnTop ? `${chromeButton} bg-chrome-white/15 text-chrome-white` : chromeButton
-          }
-        >
-          {alwaysOnTop ? <Pin size={15} /> : <PinOff size={15} />}
-        </button>
-        <button
-          type="button"
-          aria-label={getString("pip_window_return")}
-          title={getString("pip_window_return")}
-          onClick={() => void returnToMainWindow()}
-          className={chromeButton}
-        >
-          <Maximize2 size={15} />
-        </button>
-        {!IS_MACOS_RUNTIME && (
+        {/* Dark backing like the mini player's, so the buttons stay readable over a bright video. */}
+        <div className="flex shrink-0 items-center gap-1 rounded-full bg-chrome-black/80 p-1">
+          {canPin && (
+            <button
+              type="button"
+              aria-label={
+                alwaysOnTop ? getString("pip_window_unpin") : getString("pip_window_pin")
+              }
+              title={alwaysOnTop ? getString("pip_window_unpin") : getString("pip_window_pin")}
+              onClick={toggleAlwaysOnTop}
+              className={
+                alwaysOnTop ? `${chromeButton} bg-chrome-white/15 text-chrome-white` : chromeButton
+              }
+            >
+              {alwaysOnTop ? <Pin size={15} /> : <PinOff size={15} />}
+            </button>
+          )}
           <button
             type="button"
-            aria-label={getString("pip_window_close")}
-            title={getString("pip_window_close")}
-            onClick={() => void closeWindow()}
+            aria-label={getString("pip_window_return")}
+            title={getString("pip_window_return")}
+            onClick={() => void returnToMainWindow()}
             className={chromeButton}
           >
-            <X size={16} />
+            <Maximize2 size={15} />
           </button>
-        )}
+          {!IS_MACOS_RUNTIME && (
+            <button
+              type="button"
+              aria-label={getString("pip_window_close")}
+              title={getString("pip_window_close")}
+              onClick={() => void closeWindow()}
+              className={chromeButton}
+            >
+              <X size={16} />
+            </button>
+          )}
+        </div>
       </div>
 
       {!IS_MACOS_RUNTIME && <WindowResizeEdges zIndexClass="z-[300]" />}

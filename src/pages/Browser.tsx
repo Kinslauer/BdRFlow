@@ -5,13 +5,14 @@ import { IconButton } from "../components/ui/IconButton";
 import { getString } from "../lib/i18n/index";
 import { addressToUrl, browsePath, urlFromBrowsePath } from "../lib/browserUrl";
 import { reloadBrowserView, stopBrowserView } from "../lib/api/browser";
-import { FOCUS_ADDRESS_BAR_EVENT } from "../lib/browserTabs";
+import { FOCUS_ADDRESS_BAR_EVENT, tabPath } from "../lib/browserTabs";
 import { openExternal } from "../lib/openExternal";
 import { useBrowserView } from "../lib/useBrowserView";
 import { useBrowserStore, selectBrowserPage } from "../store/useBrowserStore";
-import { selectActiveTab, useTabsStore } from "../store/useTabsStore";
+import { activeTab, useTabsStore } from "../store/useTabsStore";
 import { useMusicPlayerStore } from "../store/useMusicPlayerStore";
 import { usePlayerStore } from "../store/usePlayerStore";
+import { IS_MAIN_WINDOW } from "../lib/appWindow";
 
 
 /*
@@ -26,7 +27,7 @@ export default function Browser() {
   const location = useLocation();
   const navigate = useNavigate();
   const tabId = useTabsStore((s) => s.activeId);
-  const activePath = useTabsStore((s) => selectActiveTab(s).path);
+  const activePath = useTabsStore((s) => tabPath(activeTab(s)));
   const currentPath = location.pathname + location.search;
   const url = urlFromBrowsePath(currentPath);
   const page = useBrowserStore(selectBrowserPage(tabId));
@@ -37,7 +38,8 @@ export default function Browser() {
   // the router follows. Until both agree, the route still shows the previous
   // tab or address, so the page is left as it is.
   const inSync = activePath === currentPath;
-  const { error } = useBrowserView(tabId, url, viewRef, inSync);
+  // Web pages are child views of the main window; another window can't show them.
+  const { error } = useBrowserView(tabId, url, viewRef, inSync && IS_MAIN_WINDOW);
 
   const [address, setAddress] = useState(url ?? "");
   const [editing, setEditing] = useState(false);
@@ -154,7 +156,9 @@ export default function Browser() {
           ref={viewRef}
           className="relative flex min-h-0 flex-1 items-center justify-center border-t border-chrome-zinc-800 bg-background"
         >
-          {!url ? (
+          {!IS_MAIN_WINDOW ? (
+            <p className="max-w-sm px-6 text-center text-sm text-chrome-zinc-400">{getString("browser_main_window_only")}</p>
+          ) : !url ? (
             <div className="flex max-w-sm flex-col items-center gap-3 px-6 text-center">
               <Globe size={32} className="text-chrome-zinc-500" />
               <p className="text-base font-semibold text-chrome-zinc-100">{getString("browser_start_title")}</p>

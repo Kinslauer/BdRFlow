@@ -1,26 +1,21 @@
-use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use sqlx::SqlitePool;
 use tauri::{AppHandle, Manager, State};
 
+use crate::commands::linked::err as linked_err;
 use crate::errors::ErrorResponse;
 use crate::flow_neuro::bootstrap::ImportedVideo;
 use crate::flow_neuro::signals::InteractionType;
 use crate::flow_neuro::watch_session::{END_GRACE_SECONDS, WatchReport};
 use crate::models::video::VideoSummary;
 use crate::services::blocked_channel_names::{self, BlockedChannelNames};
+use crate::services::profile_interests::{PersonaDetails, ProfileInterests, stored_interests};
+use crate::services::profile_service::ProfileService;
 use crate::services::recommendation_service::RecommendationService;
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PersonaDetails {
-    pub name: String,
-    pub title: String,
-    pub description: String,
-    pub icon: String,
-}
+use crate::sync2::actions::leave_if_linked;
+use crate::sync2::profile_actions::syncs_link;
 
 #[tauri::command]
 pub async fn log_interaction(
@@ -138,11 +133,37 @@ pub async fn record_feed_impressions(
     videos: Vec<VideoSummary>,
     recommendation_service: State<'_, RecommendationService>,
     home: State<'_, crate::services::home_feed::HomeFeedService>,
+    pool: State<'_, SqlitePool>,
 ) -> Result<(), ErrorResponse> {
     let ids: Vec<String> = videos.iter().map(|video| video.id.clone()).collect();
     home.note_impressions(&app, &ids).await;
+    let _ =
+        crate::db::seen_videos::remember(&pool, &ids, chrono::Utc::now().timestamp_millis()).await;
     recommendation_service
         .record_feed_impressions(videos)
+        .await
+        .map_err(ErrorResponse::from)
+}
+
+/// Cards seen in a list the ranker does not learn from (the Watch page's related videos): kept
+/// only so "Hide videos you've already seen" can leave them out.
+#[tauri::command]
+pub async fn record_seen_videos(
+    ids: Vec<String>,
+    pool: State<'_, SqlitePool>,
+) -> Result<(), ErrorResponse> {
+    crate::db::seen_videos::remember(&pool, &ids, chrono::Utc::now().timestamp_millis())
+        .await
+        .map_err(ErrorResponse::from)
+}
+
+/// Which of these videos were already seen.
+#[tauri::command]
+pub async fn seen_video_ids_among(
+    ids: Vec<String>,
+    pool: State<'_, SqlitePool>,
+) -> Result<Vec<String>, ErrorResponse> {
+    crate::db::seen_videos::among(&pool, &ids)
         .await
         .map_err(ErrorResponse::from)
 }
@@ -176,13 +197,22 @@ pub async fn get_flow_persona(
         .get_personality()
         .await
         .map_err(ErrorResponse::from)?;
+    Ok(persona.into())
+}
 
-    Ok(PersonaDetails {
-        name: persona.name().to_string(),
-        title: persona.title().to_string(),
-        description: persona.description().to_string(),
-        icon: persona.icon().to_string(),
-    })
+/// Another profile's brain, persona and music taste, read from its database on this device.
+#[tauri::command]
+pub async fn get_profile_interests(
+    profile: String,
+    profiles: State<'_, ProfileService>,
+) -> Result<ProfileInterests, ErrorResponse> {
+    let (pool, _) = profiles
+        .open_closed(&profile)
+        .await
+        .map_err(ErrorResponse::from)?;
+    let interests = stored_interests(&pool, now_ms()).await;
+    pool.close().await;
+    interests.map_err(ErrorResponse::from)
 }
 
 #[tauri::command]
@@ -205,6 +235,23 @@ pub async fn get_taste_overview(
 
 fn now_ms() -> u64 {
     u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or(0)
+}
+
+/// Channels several of the viewer's own sit next to, for Discover channels.
+#[tauri::command]
+pub async fn get_neighbour_channels(
+    recommendation_service: State<'_, RecommendationService>,
+    pool: State<'_, SqlitePool>,
+) -> Result<Vec<crate::services::home_feed::neighbours::DiscoverableChannel>, ErrorResponse> {
+    use crate::services::home_feed::{inputs, neighbours};
+    let subscriptions = inputs::subscriptions(&pool)
+        .await
+        .map_err(ErrorResponse::from)?;
+    let stored = neighbours::load(&pool).await.map_err(ErrorResponse::from)?;
+    let found = recommendation_service
+        .neighbour_channels(&subscriptions.names)
+        .await;
+    Ok(neighbours::discoverable(found, &stored))
 }
 
 /// Home stops drawing on a channel the viewer keeps watching until they watch it again.
@@ -401,10 +448,16 @@ pub async fn import_brain(
         .map_err(ErrorResponse::from)
 }
 
+/// In the profile that syncs, this device leaves its sync group first, so the reset brain never
+/// reaches the other devices.
 #[tauri::command]
 pub async fn reset_brain(
+    app: AppHandle,
     recommendation_service: State<'_, RecommendationService>,
 ) -> Result<(), ErrorResponse> {
+    if syncs_link(&app).await {
+        leave_if_linked(&app).await.map_err(|e| linked_err(&e))?;
+    }
     recommendation_service
         .reset_brain()
         .await

@@ -1,0 +1,65 @@
+import { SettingsGroup } from '../SettingsGroup';
+import { SettingItem } from '../SettingItem';
+import { ToggleSwitch } from '../../ui/ToggleSwitch';
+import { Select } from '../../ui/Select';
+import { useBoolPref, usePreference } from '../../../lib/usePreference';
+import { getString } from '../../../lib/i18n/index';
+import { SETTINGS } from '../../../lib/settings/schema';
+import { isSettingDisabledUntilWired } from '../../../lib/settings/values';
+import { useMusicPlayerStore } from '../../../store/useMusicPlayerStore';
+import { IS_LINUX_RUNTIME } from '../../../lib/platform';
+
+export function MusicPlaybackSettings() {
+  const [audioQuality, setAudioQuality] = usePreference(SETTINGS.MUSIC_AUDIO_QUALITY, 'Auto');
+  const [restoreQueue, setRestoreQueue] = useBoolPref(SETTINGS.MUSIC_RESTORE_QUEUE, true);
+  const [resumeLongTracks, setResumeLongTracks] = useBoolPref(SETTINGS.MUSIC_RESUME_LONG_TRACKS, false);
+  const [sleepTimerButton, setSleepTimerButton] = useBoolPref(SETTINGS.MUSIC_SLEEP_TIMER_BUTTON, false);
+  const [swipeLeft, setSwipeLeft] = usePreference(SETTINGS.MUSIC_QUEUE_SWIPE_LEFT);
+  const [swipeRight, setSwipeRight] = usePreference(SETTINGS.MUSIC_QUEUE_SWIPE_RIGHT);
+  const [openPlayer, setOpenPlayer] = useBoolPref(SETTINGS.MUSIC_OPEN_PLAYER_ON_PLAY);
+  const [pauseWhenMuted, setPauseWhenMuted] = useBoolPref(SETTINGS.MUSIC_PAUSE_WHEN_MUTED);
+  const radioEnabled = useMusicPlayerStore((state) => state.radioEnabled);
+  const toggleRadio = useMusicPlayerStore((state) => state.toggleRadio);
+  const qualityDisabled = isSettingDisabledUntilWired(SETTINGS.MUSIC_AUDIO_QUALITY);
+  const swipeOptions = [
+    { value: 'PLAY_NEXT', label: getString('music_play_next') },
+    { value: 'MOVE_TO_END', label: getString('music_move_to_end') },
+    { value: 'REMOVE', label: getString('music_remove_from_queue') },
+  ];
+
+  return (
+    <SettingsGroup title={getString('settings_group_music_playback')}>
+      <SettingItem title={getString('settings_music_audio_quality')} description={getString('settings_music_audio_quality_desc')} disabled={qualityDisabled}>
+        <Select value={audioQuality} onChange={setAudioQuality} disabled={qualityDisabled} options={[
+          { value: 'Auto', label: getString('quality_auto') }, { value: 'High', label: getString('settings_option_high') },
+          { value: 'Medium', label: getString('settings_option_medium') }, { value: 'Low', label: getString('settings_option_low') },
+        ]} />
+      </SettingItem>
+      <SettingItem title={getString('settings_music_restore_queue')} description={getString('settings_music_restore_queue_desc')}>
+        <ToggleSwitch checked={restoreQueue} onChange={setRestoreQueue} />
+      </SettingItem>
+      <SettingItem title={getString('settings_music_resume_long_tracks')} description={getString('settings_music_resume_long_tracks_desc')}>
+        <ToggleSwitch checked={resumeLongTracks} onChange={setResumeLongTracks} />
+      </SettingItem>
+      <SettingItem title={getString('settings_music_queue_swipe_left')} description={getString('settings_music_queue_swipe_desc')}>
+        <Select value={swipeLeft} onChange={setSwipeLeft} options={swipeOptions} />
+      </SettingItem>
+      <SettingItem title={getString('settings_music_queue_swipe_right')} description={getString('settings_music_queue_swipe_desc')}>
+        <Select value={swipeRight} onChange={setSwipeRight} options={swipeOptions} />
+      </SettingItem>
+      <SettingItem title={getString('settings_music_sleep_timer_button')} description={getString('settings_music_sleep_timer_button_desc')}>
+        <ToggleSwitch checked={sleepTimerButton} onChange={setSleepTimerButton} />
+      </SettingItem>
+      <SettingItem title={getString('music_autoplay')} description={getString('music_autoplay_desc')}>
+        <ToggleSwitch checked={radioEnabled} onChange={() => toggleRadio()} />
+      </SettingItem>
+      <SettingItem title={getString('settings_open_music_player_on_play')} description={getString('settings_open_music_player_on_play_desc')}>
+        <ToggleSwitch checked={openPlayer} onChange={setOpenPlayer} />
+      </SettingItem>
+      {/* The backend can't read the system volume on Linux, so there only Flow's own mute counts. */}
+      <SettingItem title={getString('settings_pause_when_muted')} description={getString(IS_LINUX_RUNTIME ? 'settings_pause_when_muted_desc_app_only' : 'settings_pause_when_muted_desc')}>
+        <ToggleSwitch checked={pauseWhenMuted} onChange={setPauseWhenMuted} />
+      </SettingItem>
+    </SettingsGroup>
+  );
+}

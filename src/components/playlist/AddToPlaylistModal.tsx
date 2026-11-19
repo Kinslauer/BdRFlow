@@ -2,67 +2,21 @@ import React, { useEffect, useMemo, useState } from "react";
 import { ListVideo, Plus, X } from "lucide-react";
 import { getString } from "../../lib/i18n/index";
 import { Button } from "../ui/Button";
+import { PlaylistChoiceCard } from "./PlaylistChoiceCard";
 import {
   addVideoToStoredPlaylist,
   createStoredPlaylist,
+  isProtectedPlaylistId,
   loadStoredPlaylists,
   PLAYLIST_LIBRARY_UPDATED_EVENT,
-  storedPlaylistToCardSummary,
-  WATCH_LATER_PLAYLIST_ID,
+  removeVideoFromWatchLater,
+  updateStoredPlaylistTracks,
   type StoredPlaylist,
 } from "../../lib/playlistLibrary";
-import { useProxiedImageUrl } from "../../lib/useProxiedImageUrl";
 import { usePlaylistModalStore } from "../../store/usePlaylistModalStore";
 import { useUiStore } from "../../store/useUiStore";
 import { noteVideoSaved } from "../../lib/videoSaved";
-
-function PlaylistChoiceCard({
-  fallbackThumbnailUrl,
-  playlist,
-  onClick,
-}: {
-  fallbackThumbnailUrl?: string | null;
-  playlist: StoredPlaylist;
-  onClick: () => void;
-}) {
-  const summary = storedPlaylistToCardSummary(playlist);
-  const thumbnailUrl = summary.thumbnailUrl
-    ?? (playlist.id === WATCH_LATER_PLAYLIST_ID ? fallbackThumbnailUrl : null)
-    ?? null;
-  const imageSrc = useProxiedImageUrl(thumbnailUrl);
-
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className="flex w-full items-center gap-3 rounded-lg p-2 text-left transition-colors hover:bg-surface-container-high"
-    >
-      <span className="relative aspect-video w-20 shrink-0 overflow-hidden rounded-md bg-surface-container-high ring-1 ring-chrome-neutral-800/50">
-        {imageSrc ? (
-          <img
-            src={imageSrc}
-            alt=""
-            loading="lazy"
-            className="h-full w-full object-cover"
-          />
-        ) : (
-          <span className="grid h-full w-full place-items-center text-chrome-neutral-500">
-            <ListVideo size={20} />
-          </span>
-        )}
-      </span>
-
-      <span className="min-w-0 flex-1">
-        <span className="line-clamp-1 text-sm font-medium text-chrome-neutral-100">
-          {summary.title}
-        </span>
-        <span className="line-clamp-1 text-xs text-chrome-neutral-500">
-          {summary.videoCountText}
-        </span>
-      </span>
-    </button>
-  );
-}
+import { showSaveFailedToast, showSaveToast, type SaveDestination } from "../../lib/saveToast";
 
 export function AddToPlaylistModal() {
   const addTarget = usePlaylistModalStore((s) => s.addTarget);
@@ -103,37 +57,53 @@ export function AddToPlaylistModal() {
     closeAddToPlaylist();
   };
 
-  const handleAdd = async (playlistId: string) => {
-    try {
-      const updated = await addVideoToStoredPlaylist(playlistId, addTarget);
-      if (!updated) throw new Error("Playlist not found");
-      noteVideoSaved(addTarget);
+  const item = { title: addTarget.title, image: addTarget.thumbnailUrl, shape: "landscape" as const };
+  const video = addTarget;
 
-      showToast({
-        variant: "success",
-        message: getString("video_added_to_playlist"),
+  const destinationFor = (playlistId: string, name: string): SaveDestination => (
+    isProtectedPlaylistId(playlistId) ? { kind: "watchLater" } : { kind: "playlist", id: playlistId, name }
+  );
+
+  const undoAdd = (playlistId: string) => (
+    isProtectedPlaylistId(playlistId)
+      ? removeVideoFromWatchLater(video.id)
+      : updateStoredPlaylistTracks(playlistId, (tracks) => tracks.filter((track) => track.id !== video.id))
+  );
+
+  const handleAdd = async (playlistId: string) => {
+    const playlist = playlists.find((stored) => stored.id === playlistId);
+    const destination = destinationFor(playlistId, playlist?.name ?? "");
+    const alreadyThere = !!playlist?.tracks.some((track) => track.id === video.id);
+    try {
+      const updated = await addVideoToStoredPlaylist(playlistId, video);
+      if (!updated) throw new Error("Playlist not found");
+      noteVideoSaved(video);
+
+      showSaveToast({
+        destination,
+        item,
+        undo: alreadyThere ? undefined : () => undoAdd(playlistId),
       });
       close();
     } catch (error) {
       console.error("Failed to add video to playlist", error);
-      showToast({
-        variant: "error",
-        message: getString("video_add_to_playlist_failed"),
-      });
+      showSaveFailedToast({ destination, item, retry: () => handleAdd(playlistId) });
     }
   };
 
   const handleCreate = async (event: React.FormEvent) => {
     event.preventDefault();
-    if (!newName.trim()) return;
+    const name = newName.trim();
+    if (!name) return;
 
     try {
-      const playlist = await createStoredPlaylist(newName);
-      await addVideoToStoredPlaylist(playlist.id, addTarget);
-      noteVideoSaved(addTarget);
-      showToast({
-        variant: "success",
-        message: getString("video_added_to_playlist"),
+      const playlist = await createStoredPlaylist(name);
+      await addVideoToStoredPlaylist(playlist.id, video);
+      noteVideoSaved(video);
+      showSaveToast({
+        destination: destinationFor(playlist.id, playlist.name),
+        item,
+        undo: () => undoAdd(playlist.id),
       });
       close();
     } catch (error) {
@@ -151,6 +121,9 @@ export function AddToPlaylistModal() {
       onClick={close}
     >
       <div
+        role="dialog"
+        aria-modal="true"
+        aria-label={getString("playlist_add_modal_title")}
         className="w-full max-w-sm rounded-2xl border border-chrome-neutral-800 bg-surface-container p-5"
         onClick={(event) => event.stopPropagation()}
       >
@@ -159,7 +132,7 @@ export function AddToPlaylistModal() {
             <h3 className="text-lg font-bold text-chrome-neutral-100">
               {getString("playlist_add_modal_title")}
             </h3>
-            <p className="mt-0.5 line-clamp-1 text-sm text-chrome-neutral-400">{addTarget.title}</p>
+            <p dir="auto" className="mt-0.5 line-clamp-1 text-sm text-chrome-neutral-400">{addTarget.title}</p>
           </div>
           <button
             type="button"
@@ -171,7 +144,7 @@ export function AddToPlaylistModal() {
           </button>
         </div>
 
-        <div className="mt-4 max-h-72 space-y-1 overflow-y-auto hide-scrollbar">
+        <div className="mt-4 max-h-72 space-y-1 overflow-y-auto">
           {selectablePlaylists.map((playlist) => (
             <PlaylistChoiceCard
               key={playlist.id}
@@ -223,7 +196,7 @@ export function AddToPlaylistModal() {
           <button
             type="button"
             onClick={() => setCreating(true)}
-            className="mt-3 flex w-full items-center gap-3 rounded-lg p-2 text-left text-sm font-medium text-[var(--color-primary)] transition-colors hover:bg-surface-container-high"
+            className="mt-3 flex w-full items-center gap-3 rounded-lg p-2 text-start text-sm font-medium text-[var(--color-primary)] transition-colors hover:bg-surface-container-high"
           >
             <span className="grid h-10 w-10 shrink-0 place-items-center rounded-md bg-surface-container-high">
               <Plus size={18} />

@@ -1,149 +1,156 @@
 import { beforeEach, describe, expect, it } from "vitest";
+import { NavigationType } from "react-router-dom";
+import { activeTab, useTabsStore } from "./useTabsStore";
+import { createEntry } from "../lib/tabs/tabHistory";
 
-import { HOME_PATH, selectActiveTab, useTabsStore, watchIdFromTabPath } from "./useTabsStore";
+const paths = () => activeTab(useTabsStore.getState()).entries.map((entry) => entry.pathname);
+const index = () => activeTab(useTabsStore.getState()).index;
 
-function reset() {
-  const home = { id: "t0", path: HOME_PATH, title: "", back: [], forward: [] };
-  useTabsStore.setState({ tabs: [home], activeId: home.id, closed: [] });
-}
-
-const state = () => useTabsStore.getState();
-const active = () => selectActiveTab(state());
-const paths = () => state().tabs.map((t) => t.path);
-
-describe("useTabsStore", () => {
-  beforeEach(reset);
-
-  it("opens background tabs right after the active one", () => {
-    state().openTab("/watch/a");
-    state().openTab("/watch/b");
-    expect(paths()).toEqual([HOME_PATH, "/watch/b", "/watch/a"]);
-    expect(active().path).toBe(HOME_PATH);
+describe("useTabsStore navigation", () => {
+  beforeEach(() => {
+    useTabsStore.setState({
+      tabs: [{ id: "tab-1", entries: [createEntry("/")], index: 0 }],
+      activeId: "tab-1",
+      action: NavigationType.Pop,
+      cause: "history",
+      playerTabId: null,
+      parked: {},
+      titles: {},
+    });
   });
 
-  it("activates a new tab when asked", () => {
-    const id = state().openTab("/search?q=x", { activate: true, title: "x" });
-    expect(state().activeId).toBe(id);
-    expect(active().title).toBe("x");
+  it("starts from the page the window opened on", () => {
+    expect(paths()).toEqual(["/"]);
   });
 
-  it("records pushes onto the active tab's own history", () => {
-    state().recordNavigation("/subscriptions", "push");
-    state().recordNavigation("/watch/a", "push");
-    expect(active().back).toEqual([HOME_PATH, "/subscriptions"]);
+  it("pushes, replaces and walks the active tab's list", () => {
+    const { push, replace, go } = useTabsStore.getState();
+    push("/feed");
+    push("/watch/abc", { from: "feed" });
+    expect(useTabsStore.getState().action).toBe(NavigationType.Push);
+    replace("/watch/def");
+    expect(useTabsStore.getState().action).toBe(NavigationType.Replace);
+    expect(paths()).toEqual(["/", "/feed", "/watch/def"]);
 
-    state().goBack();
-    expect(active().path).toBe("/subscriptions");
-    expect(active().forward).toEqual(["/watch/a"]);
-
-    state().goForward();
-    expect(active().path).toBe("/watch/a");
-    expect(active().forward).toEqual([]);
+    go(-2);
+    expect(index()).toBe(0);
+    expect(useTabsStore.getState().action).toBe(NavigationType.Pop);
+    go(1);
+    expect(index()).toBe(1);
   });
 
-  it("replaces without adding history, and a push clears forward", () => {
-    state().recordNavigation("/watch/a", "push");
-    state().recordNavigation("/watch/b", "replace");
-    expect(active().back).toEqual([HOME_PATH]);
-    expect(active().path).toBe("/watch/b");
+  it("leaves the state alone when Back has nowhere to go", () => {
+    const before = useTabsStore.getState();
+    before.go(-1);
+    expect(useTabsStore.getState().tabs).toBe(before.tabs);
+  });
+});
 
-    state().goBack();
-    state().recordNavigation("/history", "push");
-    expect(active().forward).toEqual([]);
+describe("useTabsStore tabs", () => {
+  beforeEach(() => {
+    useTabsStore.setState({
+      tabs: [{ id: "tab-1", entries: [createEntry("/")], index: 0 }],
+      activeId: "tab-1",
+      action: NavigationType.Pop,
+      cause: "history",
+      playerTabId: null,
+      parked: {},
+      titles: {},
+    });
   });
 
-  it("keeps each tab's history separate", () => {
-    state().recordNavigation("/history", "push");
-    const second = state().openTab("/watch/a", { activate: true });
-    expect(active().back).toEqual([]);
-    state().goBack();
-    expect(active().path).toBe("/watch/a");
-    state().activateTab("t0");
-    expect(active().back).toEqual([HOME_PATH]);
-    expect(state().tabs.find((t) => t.id === second)?.path).toBe("/watch/a");
+  it("opens a background tab after the current one, or a foreground one when asked", () => {
+    const background = useTabsStore.getState().openTab("/feed");
+    expect(useTabsStore.getState().activeId).toBe("tab-1");
+    const foreground = useTabsStore.getState().openTab("/music", { activate: true });
+    const state = useTabsStore.getState();
+    expect(state.tabs.map((tab) => tab.id)).toEqual(["tab-1", foreground, background]);
+    expect(state.activeId).toBe(foreground);
+    expect(state.cause).toBe("tab");
+    expect(paths()).toEqual(["/music"]);
   });
 
-  it("does nothing on back or forward with an empty stack", () => {
-    state().goBack();
-    state().goForward();
-    expect(active().path).toBe(HOME_PATH);
+  it("replaces a background tab's page without touching the active one", () => {
+    const other = useTabsStore.getState().openTab("/watch/a");
+    useTabsStore.getState().replaceInTab(other, "/watch/b");
+    const tab = useTabsStore.getState().tabs.find((candidate) => candidate.id === other)!;
+    expect(tab.entries.map((entry) => entry.pathname)).toEqual(["/watch/b"]);
+    expect(paths()).toEqual(["/"]);
   });
 
-  it("hands focus to the right neighbour, or the left at the end", () => {
-    const a = state().openTab("/a", { activate: true });
-    const b = state().openTab("/b");
-    state().activateTab(a);
-    state().closeTab(a);
-    expect(state().activeId).toBe(b);
-    state().closeTab(b);
-    expect(state().activeId).toBe("t0");
+  it("closes a tab with its parked video and hands focus to the neighbour", () => {
+    const other = useTabsStore.getState().openTab("/feed");
+    useTabsStore.getState().park("tab-1", { videoId: "v", positionSeconds: 1, queue: [], currentIndex: 0, playlistContext: null });
+    useTabsStore.getState().setPlayerTab("tab-1");
+    useTabsStore.getState().closeTab("tab-1");
+    const state = useTabsStore.getState();
+    expect(state.activeId).toBe(other);
+    expect(state.parked).toEqual({});
+    expect(state.playerTabId).toBeNull();
   });
 
-  it("closing a background tab keeps the active one", () => {
-    const a = state().openTab("/a");
-    state().closeTab(a);
-    expect(state().activeId).toBe("t0");
-    expect(paths()).toEqual([HOME_PATH]);
+  it("marks a switch as a tab change and ignores unknown tabs", () => {
+    const other = useTabsStore.getState().openTab("/feed");
+    useTabsStore.getState().push("/music");
+    useTabsStore.getState().activateTab("nope");
+    expect(useTabsStore.getState().cause).toBe("history");
+    useTabsStore.getState().activateTab(other);
+    expect(useTabsStore.getState().cause).toBe("tab");
+    expect(useTabsStore.getState().action).toBe(NavigationType.Pop);
+  });
+});
+
+describe("useTabsStore titles and copies", () => {
+  beforeEach(() => {
+    useTabsStore.setState({
+      tabs: [{ id: "tab-1", entries: [createEntry("/"), createEntry("/feed")], index: 1 }],
+      activeId: "tab-1",
+      action: NavigationType.Pop,
+      cause: "history",
+      playerTabId: null,
+      parked: {},
+      titles: {},
+    });
   });
 
-  it("closing the last tab leaves a fresh home tab", () => {
-    state().recordNavigation("/history", "push");
-    state().closeTab("t0");
-    expect(state().tabs).toHaveLength(1);
-    expect(active().path).toBe(HOME_PATH);
-    expect(active().id).not.toBe("t0");
+  it("duplicates a tab's whole list in the background, with fresh keys and its title", () => {
+    const source = useTabsStore.getState().tabs[0]!;
+    useTabsStore.getState().setTabTitle("tab-1", source.entries[1]!.key, "FlowNeuro");
+    useTabsStore.getState().duplicateTab("tab-1");
+    const state = useTabsStore.getState();
+    const copy = state.tabs[1]!;
+    expect(state.activeId).toBe("tab-1");
+    expect(copy.entries.map((entry) => entry.pathname)).toEqual(["/", "/feed"]);
+    expect(copy.index).toBe(1);
+    expect(copy.entries[1]!.key).not.toBe(source.entries[1]!.key);
+    expect(state.titles[copy.id]).toEqual({ key: copy.entries[1]!.key, text: "FlowNeuro" });
   });
 
-  it("reopens the most recently closed tab with its history", () => {
-    const a = state().openTab("/a", { activate: true });
-    state().recordNavigation("/b", "push");
-    state().closeTab(a);
-    state().reopenClosedTab();
-    expect(active().path).toBe("/b");
-    expect(active().back).toEqual(["/a"]);
-    expect(state().closed).toEqual([]);
+  it("keeps the same title object when nothing changed", () => {
+    useTabsStore.getState().setTabTitle("tab-1", "k", "Home");
+    const before = useTabsStore.getState().titles;
+    useTabsStore.getState().setTabTitle("tab-1", "k", "Home");
+    expect(useTabsStore.getState().titles).toBe(before);
   });
 
-  it("closes other tabs", () => {
-    const a = state().openTab("/a");
-    state().openTab("/b");
-    state().closeOtherTabs(a);
-    expect(paths()).toEqual(["/a"]);
-    expect(state().activeId).toBe(a);
-    expect(state().closed).toHaveLength(2);
+  it("keeps only one tab, which takes over the player", () => {
+    const other = useTabsStore.getState().openTab("/music");
+    useTabsStore.getState().setTabTitle(other, "k", "Music");
+    useTabsStore.getState().park("tab-1", { videoId: "v", positionSeconds: 1, queue: [], currentIndex: 0, playlistContext: null });
+    useTabsStore.getState().setPlayerTab(other);
+    useTabsStore.getState().keepOnlyTab("tab-1");
+    const state = useTabsStore.getState();
+    expect(state.tabs.map((tab) => tab.id)).toEqual(["tab-1"]);
+    expect(state.activeId).toBe("tab-1");
+    expect(state.playerTabId).toBe("tab-1");
+    expect(state.parked).toEqual({});
+    expect(state.titles).toEqual({});
   });
 
-  it("cycles and jumps by index", () => {
-    state().openTab("/a");
-    state().openTab("/b");
-    // order: home, /b, /a
-    state().cycleTab(1);
-    expect(active().path).toBe("/b");
-    state().cycleTab(-2);
-    expect(active().path).toBe("/a");
-    state().activateIndex(0);
-    expect(active().path).toBe(HOME_PATH);
-    state().activateIndex(9);
-    expect(active().path).toBe(HOME_PATH);
-  });
-
-  it("moves tabs", () => {
-    state().openTab("/a");
-    state().openTab("/b");
-    state().moveTab(0, 2);
-    expect(paths()).toEqual(["/b", "/a", HOME_PATH]);
-  });
-
-  it("sets titles and clears them on navigation", () => {
-    state().setTitle("t0", "Home");
-    expect(active().title).toBe("Home");
-    state().recordNavigation("/history", "push");
-    expect(active().title).toBe("");
-  });
-
-  it("reads the video id from a watch path", () => {
-    expect(watchIdFromTabPath("/watch/abc")).toBe("abc");
-    expect(watchIdFromTabPath("/watch/a%20b?t=1")).toBe("a b");
-    expect(watchIdFromTabPath("/history")).toBeNull();
+  it("drops a closed tab's title", () => {
+    const other = useTabsStore.getState().openTab("/music");
+    useTabsStore.getState().setTabTitle(other, "k", "Music");
+    useTabsStore.getState().closeTab(other);
+    expect(useTabsStore.getState().titles).toEqual({});
   });
 });

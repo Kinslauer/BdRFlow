@@ -4,7 +4,7 @@ use tracing::warn;
 
 use crate::db::{settings, watch_history};
 use crate::errors::AppResult;
-use crate::flow_neuro::key_migration::{spell_from_titles, to_key_spec_2};
+use crate::flow_neuro::key_migration::{spell_from_titles, to_key_spec_2, to_key_spec_3};
 use crate::flow_neuro::language::system_language;
 use crate::flow_neuro::maintenance::migrate;
 use crate::flow_neuro::scoring::UserBrain;
@@ -65,6 +65,10 @@ pub async fn settle_brain(pool: &SqlitePool, brain: &mut UserBrain) -> AppResult
         tracing::info!("[FlowNeuro] brain converted to key spec 2");
         changed = true;
     }
+    if to_key_spec_3(brain) {
+        tracing::info!("[FlowNeuro] brain converted to key spec 3");
+        changed = true;
+    }
     // Sync carries the higher of two devices' schema numbers, so the schema cannot say whether
     // this device tidied its brain; the kept copy does.
     if settings::get_setting(pool, BRAIN_BEFORE_MIGRATION_SETTING)
@@ -78,6 +82,15 @@ pub async fn settle_brain(pool: &SqlitePool, brain: &mut UserBrain) -> AppResult
         changed = true;
     }
     Ok(changed)
+}
+
+/// The brain kept in a profile's database as stored, for showing a profile that isn't running:
+/// it only reads, so an unreadable or missing brain shows as a fresh one.
+pub async fn stored_brain(pool: &SqlitePool) -> AppResult<UserBrain> {
+    Ok(settings::get_setting(pool, BRAIN_SETTING)
+        .await?
+        .and_then(|json| serde_json::from_str(&json).ok())
+        .unwrap_or_default())
 }
 
 pub async fn get_or_create_brain(pool: &SqlitePool) -> AppResult<UserBrain> {

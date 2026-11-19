@@ -21,6 +21,7 @@ fn err(e: SyncError) -> ErrorResponse {
     ErrorResponse {
         message: e.to_string(),
         kind: e.kind().to_string(),
+        starts_at_ms: None,
     }
 }
 
@@ -120,4 +121,23 @@ pub async fn sync_cancel(
 ) -> Result<(), ErrorResponse> {
     manager.reset(&app).await;
     Ok(())
+}
+
+/// What the pairing screens need to explain a firewall that blocks the other device.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FirewallHelp {
+    /// `ufw` and/or `firewalld`, when installed (Linux only).
+    pub firewalls: Vec<&'static str>,
+    /// The port Linked devices listens on, once its service started.
+    pub linked_port: Option<u16>,
+}
+
+#[tauri::command]
+#[must_use]
+pub fn sync_firewall_help() -> FirewallHelp {
+    FirewallHelp {
+        firewalls: crate::sync::firewall::installed(),
+        linked_port: crate::sync2::lan_peers::service_port(),
+    }
 }

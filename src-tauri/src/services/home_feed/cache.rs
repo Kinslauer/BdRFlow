@@ -13,7 +13,7 @@ use crate::errors::AppResult;
 const LAST_FEED: &str = "LAST_FEED";
 const RESERVE: &str = "RESERVE";
 const RELATED: &str = "RELATED";
-const LAST_FEED_CAP: usize = 60;
+pub(super) const LAST_FEED_CAP: usize = 60;
 const RESERVE_CAP: i64 = 200;
 const RELATED_PER_SEED_CAP: usize = 20;
 const RELATED_SEED_CAP: i64 = 50;
@@ -279,7 +279,8 @@ pub async fn subscription_channel_names(pool: &SqlitePool) -> AppResult<Vec<(Str
     .await?)
 }
 
-/// Merges uploads into the store; a known length is never replaced by an unknown one.
+/// Merges uploads into the store; a known length is never replaced by an unknown one, and an
+/// upload once known to be a Short stays one.
 pub async fn merge_subscription_uploads(
     pool: &SqlitePool,
     cards: &[Card],
@@ -299,10 +300,11 @@ pub async fn merge_subscription_uploads(
                 .fetch_optional(&mut *tx)
                 .await?;
         let mut merged = card.clone();
-        if let Some(old) = existing.and_then(|(json,)| serde_json::from_str::<Card>(&json).ok())
-            && merged.video.duration_seconds.unwrap_or(0) == 0
-        {
-            merged.video.duration_seconds = old.video.duration_seconds;
+        if let Some(old) = existing.and_then(|(json,)| serde_json::from_str::<Card>(&json).ok()) {
+            if merged.video.duration_seconds.unwrap_or(0) == 0 {
+                merged.video.duration_seconds = old.video.duration_seconds;
+            }
+            merged.video.is_short |= old.video.is_short;
         }
         sqlx::query(
             "INSERT OR REPLACE INTO subscription_uploads (video_id, channel_id, published_at, card, updated_at)
@@ -324,7 +326,12 @@ pub async fn merge_subscription_uploads(
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
-    Ok(())
+    let shorts: Vec<String> = cards
+        .iter()
+        .filter(|c| c.video.is_short)
+        .map(|c| c.id().to_string())
+        .collect();
+    crate::db::known_shorts::remember(pool, &shorts, ms(now_ms)).await
 }
 
 /// When the store last took an RSS refresh; 0 when never.
@@ -405,5 +412,78 @@ mod tests {
             .unwrap();
         let stored = subscription_uploads(&pool).await.unwrap();
         assert_eq!(stored[0].video.duration_seconds, Some(600));
+    }
+
+    #[tokio::test]
+    async fn a_short_stays_a_short_after_a_merge_that_did_not_know() {
+        let pool = pool().await;
+        let mut short = card("s", "UC1", "");
+        short.published_at_ms = 500;
+        short.video.is_short = true;
+        merge_subscription_uploads(&pool, &[short.clone()], 1_000)
+            .await
+            .unwrap();
+        short.video.is_short = false;
+        merge_subscription_uploads(&pool, &[short], 2_000)
+            .await
+            .unwrap();
+        let stored = subscription_uploads(&pool).await.unwrap();
+        assert!(stored[0].video.is_short);
+    }
+
+    #[tokio::test]
+    async fn the_byline_repair_names_channel_tab_cards_after_their_channel() {
+        let pool = pool().await;
+        let with_name = |id: &str, channel: &str, name: &str| {
+            let mut card = card(id, channel, "1 day ago");
+            card.video.channel_name = name.into();
+            card.published_at_ms = 1;
+            card
+        };
+        let cards = [
+            with_name("v1", "UCa", "1.2M views"),
+            with_name("v2", "UCa", "100D Beatz"),
+            with_name("v3", "UCb", "5K views"),
+        ];
+        merge_subscription_uploads(&pool, &cards, 1).await.unwrap();
+        let memory = serde_json::to_string(&[with_name("v4", "UCc", "12K views")]).unwrap();
+        sqlx::query("INSERT INTO home_channel_memory (channel_id, name, uploads) VALUES ('UCc', '2 Minute Reviews', ?)")
+            .bind(memory)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        sqlx::raw_sql(include_str!(
+            "../../../migrations/0046_channel_tab_bylines.sql"
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let stored = subscription_uploads(&pool).await.unwrap();
+        let named = |id: &str| {
+            let card = stored.iter().find(|c| c.id() == id).unwrap();
+            (
+                card.video.channel_name.clone(),
+                card.video.view_count_text.clone(),
+            )
+        };
+        assert_eq!(
+            named("v1"),
+            ("100D Beatz".into(), Some("1.2M views".into()))
+        );
+        assert_eq!(named("v2"), ("100D Beatz".into(), None));
+        // No name is known for this channel, so the card waits for a refetch.
+        assert_eq!(named("v3"), ("5K views".into(), None));
+        let (uploads,): (String,) = sqlx::query_as("SELECT uploads FROM home_channel_memory")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let uploads: Vec<Card> = serde_json::from_str(&uploads).unwrap();
+        assert_eq!(uploads[0].video.channel_name, "2 Minute Reviews");
+        assert_eq!(
+            uploads[0].video.view_count_text.as_deref(),
+            Some("12K views")
+        );
     }
 }

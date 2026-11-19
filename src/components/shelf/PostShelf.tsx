@@ -5,11 +5,14 @@ import type { PostSummary } from "../../types/video";
 
 interface PostShelfProps {
   title: string;
+  /** Shown at the end of the header, such as a "See all" button. */
+  action?: React.ReactNode;
   posts: PostSummary[];
 }
 
 export const PostShelf: React.FC<PostShelfProps> = ({
   title,
+  action,
   posts,
 }) => {
   if (!posts || posts.length === 0) return null;
@@ -19,11 +22,12 @@ export const PostShelf: React.FC<PostShelfProps> = ({
       {/* Shelf Header */}
       <div className="flex items-center justify-between">
         <h2 className="text-lg font-bold text-chrome-zinc-100 tracking-tight flex items-center gap-2">
-          <span>{title}</span>
+          <span dir="auto">{title}</span>
           <span className="text-xs text-chrome-zinc-500 font-semibold bg-chrome-zinc-900 border border-chrome-zinc-800/80 px-2 py-0.5 rounded-full">
             {posts.length}
           </span>
         </h2>
+        {action}
       </div>
 
       <ShelfScroller className="flex gap-4 px-3 -mx-3 pt-3 -mt-2 pb-3">

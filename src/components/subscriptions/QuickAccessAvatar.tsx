@@ -1,5 +1,5 @@
 import type { ButtonHTMLAttributes } from 'react';
-import { upgradeAvatarUrl } from '../../lib/thumbnails';
+import { upgradeAvatarUrl, avatarSize } from '../../lib/thumbnails';
 import { useProxiedImageUrl } from '../../lib/useProxiedImageUrl';
 
 export interface QuickAccessAvatarProps extends ButtonHTMLAttributes<HTMLButtonElement> {
@@ -18,7 +18,7 @@ export function QuickAccessAvatar({
   ...props
 }: QuickAccessAvatarProps) {
   const initial = name.trim().charAt(0).toUpperCase() || '?';
-  const imageSrc = useProxiedImageUrl(upgradeAvatarUrl(avatarUrl));
+  const imageSrc = useProxiedImageUrl(upgradeAvatarUrl(avatarUrl, avatarSize(64)));
 
   return (
     <button
@@ -54,12 +54,12 @@ export function QuickAccessAvatar({
         {hasNewVideos ? (
           <span
             aria-hidden="true"
-            className="absolute right-0 top-0 h-3 w-3 rounded-full bg-[var(--color-primary)] ring-2 ring-background"
+            className="absolute end-0 top-0 h-3 w-3 rounded-full bg-[var(--color-primary)] ring-2 ring-background"
           />
         ) : null}
       </span>
 
-      <span
+      <span dir="auto"
         className={`line-clamp-1 w-full text-center text-xs font-medium transition-colors ${
           active
             ? 'text-chrome-neutral-100'

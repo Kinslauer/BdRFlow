@@ -11,8 +11,11 @@ use sqlx::SqlitePool;
 
 use crate::sync::canonical::{Hlc, Playlist, SubscriptionGroup};
 use crate::sync::changes::{self, Change};
+use crate::sync::clock;
 use crate::sync::error::SyncError;
+use crate::sync::ledger;
 use crate::sync::mapping;
+use crate::sync::saved_shorts;
 
 /// Record the edits a frontend write to settings `key` is about to make. A no-op for keys that
 /// aren't synced blobs.
@@ -24,7 +27,12 @@ pub async fn record_blob_write(pool: &SqlitePool, key: &str, new: &str) -> Resul
         .bind(key)
         .fetch_optional(pool)
         .await?;
-    let edits = diff_blob(key, old.as_deref().unwrap_or("[]"), new, now_ms());
+    let edits = diff_blob(
+        key,
+        old.as_deref().unwrap_or("[]"),
+        new,
+        clock::edit_ms(pool).await?,
+    );
     if edits.is_empty() {
         return Ok(());
     }
@@ -45,7 +53,12 @@ pub async fn record_watch_deletion(
                 .await?
         }
     };
-    let now = now_ms();
+    record_watch_deletions(pool, ids).await
+}
+
+/// Record the deletion of these watch history rows.
+pub async fn record_watch_deletions(pool: &SqlitePool, ids: Vec<String>) -> Result<(), SyncError> {
+    let now = clock::edit_ms(pool).await?;
     let edits: Vec<Change> = ids
         .into_iter()
         .map(|id| Change::delete(changes::WATCH_HISTORY, id, now, None))
@@ -54,11 +67,32 @@ pub async fn record_watch_deletion(
     changes::record(&mut conn, &edits).await
 }
 
+/// A row put back by Undo counts as written now: a deletion that has already left this device would
+/// beat its old time and delete it again here.
+pub async fn stamp_restored_watch(pool: &SqlitePool, video_id: &str) -> Result<(), SyncError> {
+    let at = clock::edit_ms(pool).await?;
+    let device_id = ledger::get_or_create_device_id(pool).await?;
+    sqlx::query("UPDATE watch_history SET updated_hlc = ? WHERE video_id = ?")
+        .bind(Hlc::new(at, 0, &device_id).to_string())
+        .bind(video_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// A setting that holds a synced collection rather than an app setting. Changing one is sent soon;
+/// app settings wait for the next sync, as on Flow for Android.
+#[must_use]
+pub fn is_collection_setting(key: &str) -> bool {
+    is_tracked_blob(key) || key == mapping::SUBSCRIBED_CHANNELS_SETTING_KEY
+}
+
 fn is_tracked_blob(key: &str) -> bool {
     [
         mapping::LIKES_SETTING_KEY,
         mapping::PLAYLISTS_SETTING_KEY,
         mapping::ALBUMS_SETTING_KEY,
+        saved_shorts::SAVED_SHORTS_SETTING_KEY,
         mapping::SUBSCRIPTION_GROUPS_SETTING_KEY,
     ]
     .contains(&key)
@@ -77,6 +111,11 @@ pub fn diff_blob(key: &str, old: &str, new: &str, now_ms: u64) -> Vec<Change> {
         mapping::ALBUMS_SETTING_KEY => diff_playlists(
             &mapping::parse_albums_blob(old, ""),
             &mapping::parse_albums_blob(new, ""),
+            now_ms,
+        ),
+        saved_shorts::SAVED_SHORTS_SETTING_KEY => diff_playlists(
+            &[saved_shorts::parse_library(old, "")],
+            &[saved_shorts::parse_library(new, "")],
             now_ms,
         ),
         mapping::SUBSCRIPTION_GROUPS_SETTING_KEY => diff_groups(old, new, now_ms),
@@ -188,15 +227,25 @@ fn diff_groups(old: &str, new: &str, now: u64) -> Vec<Change> {
         .filter(|n| !after.contains_key(*n))
         .map(|n| Change::delete(changes::GROUPS, n.clone(), now, None))
         .collect();
-    out.extend(
-        after
-            .iter()
-            .filter(|(n, g)| before.get(*n) != Some(g))
-            .map(|(n, _)| Change::edit(changes::GROUPS, n.clone(), now)),
-    );
+    for (name, group) in &after {
+        let was = before.get(name);
+        if was != Some(group) {
+            out.push(Change::edit(changes::GROUPS, name.clone(), now));
+        }
+        let had = was.map_or(&[][..], |g| g.channel_ids.as_slice());
+        let key = |channel: &String| changes::item_key(name, channel);
+        out.extend(
+            had.iter()
+                .filter(|c| !group.channel_ids.contains(c))
+                .map(|c| Change::delete(changes::GROUP_MEMBERS, key(c), now, None)),
+        );
+        out.extend(
+            group
+                .channel_ids
+                .iter()
+                .filter(|c| !had.contains(c))
+                .map(|c| Change::edit(changes::GROUP_MEMBERS, key(c), now)),
+        );
+    }
     out
-}
-
-fn now_ms() -> u64 {
-    u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or(0)
 }

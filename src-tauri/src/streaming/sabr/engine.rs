@@ -82,10 +82,12 @@ impl TrackBuffer {
             ..Default::default()
         }
     }
+    #[cfg(test)]
     fn done(&self) -> bool {
         (self.end_seq > 0 && i64::from(self.max_seq) >= self.end_seq)
             || (self.total_ms > 0 && self.init.is_some() && self.segments_cover_total())
     }
+    #[cfg(test)]
     fn segments_cover_total(&self) -> bool {
         // crude: rely on max_seq vs end_seq; total_ms handled by state
         self.end_seq > 0 && i64::from(self.max_seq) >= self.end_seq
@@ -168,6 +170,20 @@ pub struct SabrEngine {
     started: AtomicBool,
     request_counter: AtomicU64,
     restart_request: AtomicBool,
+    failed: AtomicBool,
+}
+
+/// The web clients whose SABR sessions take Flow's own `BotGuard` token. When that token can't be
+/// refreshed, every one of their sessions stops at the same minute.
+const WEB_SABR_CLIENTS: [&str; 2] = ["MWEB", "WEB"];
+
+/// Attestation ran out with no way to renew it, so a retry under the same web clients stops at the
+/// same point. They go last for a while and the next resolve tries the direct clients first.
+fn bench_web_sabr_clients(session_id: &str) {
+    info!(session = %session_id, "SABR attestation can't be renewed; trying the web clients last for a while");
+    for client in WEB_SABR_CLIENTS {
+        crate::api::innertube::core::gate_tracker::gate(client);
+    }
 }
 
 impl SabrEngine {
@@ -198,20 +214,17 @@ impl SabrEngine {
             .or_else(|| audio_tracks.first());
         let (active_key, active_itag) = match initial {
             Some(t) => {
-                state.set_audio_format(
-                    FormatId::new(
-                        t.format.itag,
-                        t.format.last_modified,
-                        t.format.xtags.clone(),
-                    ),
-                    t.format.mime_type.clone(),
-                );
+                state.set_audio_format(FormatId::new(
+                    t.format.itag,
+                    t.format.last_modified,
+                    t.format.xtags.clone(),
+                ));
                 (t.key.clone(), t.format.itag)
             }
             None => (String::new(), selected.audio.itag),
         };
 
-        let client = reqwest::Client::builder()
+        let client = crate::api::app_proxy::with_app_network(reqwest::Client::builder())
             .pool_idle_timeout(Duration::from_secs(60))
             .build()
             .unwrap_or_default();
@@ -238,6 +251,7 @@ impl SabrEngine {
             started: AtomicBool::new(false),
             request_counter: AtomicU64::new(0),
             restart_request: AtomicBool::new(false),
+            failed: AtomicBool::new(false),
         }
     }
 
@@ -260,6 +274,11 @@ impl SabrEngine {
         self.cancelled.store(true, Ordering::SeqCst);
         self.notify_demand.notify_waiters();
         self.notify_data.notify_waiters();
+    }
+
+    /// The session ended on an error, so a new resolve must start a session of its own.
+    pub fn has_failed(&self) -> bool {
+        self.failed.load(Ordering::SeqCst)
     }
 
     fn is_cancelled(&self) -> bool {
@@ -311,6 +330,7 @@ impl SabrEngine {
                         "sabr_attestation_refresh"
                     );
                     if !refreshed {
+                        bench_web_sabr_clients(&self.session_id);
                         let mut store = self.store.lock().await;
                         store.last_error = Some(SabrError::AttestationRequired);
                         self.notify_data.notify_waiters();
@@ -322,6 +342,9 @@ impl SabrEngine {
                 Err(err) => {
                     warn!(session = %self.session_id, code = err.code(), error = %err, "sabr_error");
                     if !err.is_retryable() || consecutive_errors >= self.config.max_retries {
+                        if matches!(err, SabrError::AttestationRequired) {
+                            bench_web_sabr_clients(&self.session_id);
+                        }
                         let mut store = self.store.lock().await;
                         store.last_error = Some(err);
                         self.notify_data.notify_waiters();
@@ -345,6 +368,9 @@ impl SabrEngine {
         {
             let mut store = self.store.lock().await;
             store.done = true;
+            if store.last_error.is_some() {
+                self.failed.store(true, Ordering::SeqCst);
+            }
         }
         self.notify_data.notify_waiters();
         info!(session = %self.session_id, "sabr_session_finished");
@@ -445,7 +471,6 @@ impl SabrEngine {
                 {
                     match action {
                         CycleAction::Reload => return Err(SabrError::ReloadRequired),
-                        CycleAction::Stop => return Ok(false),
                     }
                 }
             }
@@ -569,6 +594,14 @@ impl SabrEngine {
                 }
             }
             ump::RELOAD_PLAYER_RESPONSE => {
+                // ReloadPlayerResponse { 1: ReloadPlaybackParams { 1: token } }: the
+                // next player request sends it back to keep this session's state.
+                if let Some(token) = reload_token(data) {
+                    crate::api::innertube::core::playback_session::store_reload_token(
+                        &self.descriptor.video_id,
+                        token,
+                    );
+                }
                 return Ok(Some(CycleAction::Reload));
             }
             ump::END_OF_TRACK => {
@@ -727,14 +760,11 @@ impl SabrEngine {
             .store(track.format.itag, Ordering::Relaxed);
         {
             let mut st = self.state.lock().await;
-            st.set_audio_format(
-                FormatId::new(
-                    track.format.itag,
-                    track.format.last_modified,
-                    track.format.xtags.clone(),
-                ),
-                track.format.mime_type.clone(),
-            );
+            st.set_audio_format(FormatId::new(
+                track.format.itag,
+                track.format.last_modified,
+                track.format.xtags.clone(),
+            ));
         }
         {
             let mut store = self.store.lock().await;
@@ -922,7 +952,6 @@ impl SabrEngine {
 
 enum CycleAction {
     Reload,
-    Stop,
 }
 
 // Decode standard or URL-safe base64 (with or without padding).
@@ -952,5 +981,40 @@ mod tests {
         tb.end_seq = 3;
         tb.max_seq = 3;
         assert!(tb.done());
+    }
+}
+
+/// The token inside a `RELOAD_PLAYER_RESPONSE` part.
+fn reload_token(data: &[u8]) -> Option<String> {
+    let mut reader = super::pb::PbReader::new(data);
+    while let Some(field) = reader.next_field() {
+        if field.number == 1 && field.wire_type == 2 {
+            let mut params = super::pb::PbReader::new(field.bytes);
+            while let Some(param) = params.next_field() {
+                if param.number == 1 {
+                    return param.as_str().map(ToOwned::to_owned);
+                }
+            }
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod reload_tests {
+    use super::*;
+    use crate::streaming::sabr::pb::PbWriter;
+
+    #[test]
+    fn reads_the_reload_token() {
+        let mut params = PbWriter::new();
+        params.write_string(1, "reload-token");
+        let mut message = PbWriter::new();
+        message.write_message(1, params.as_slice());
+        assert_eq!(
+            reload_token(message.as_slice()).as_deref(),
+            Some("reload-token")
+        );
+        assert_eq!(reload_token(&[]), None);
     }
 }

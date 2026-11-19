@@ -1,305 +1,257 @@
 import { create } from "zustand";
+import { NavigationType, type To } from "react-router-dom";
+import {
+  createEntry,
+  createEntryKey,
+  goInTab,
+  pushEntry,
+  replaceEntry,
+  type TabHistory,
+} from "../lib/tabs/tabHistory";
+import { createTabId, insertTabAfter, neighborTab } from "../lib/tabs/tabList";
+import type { PlaylistContext } from "./usePlayerStore";
+import type { VideoSummary } from "../types/video";
 
-/*
-  Browser-style tabs.
-
-  A tab is nothing more than a location (pathname + search) with its own back and
-  forward stacks. Only the active tab is ever rendered: switching tabs navigates
-  the router to that tab's location, and the pages load as they would on any
-  other navigation. Watch pages resume from saved progress, so a video tab picks
-  up where it was left when it is switched back to.
-
-  The router and this store are kept in step by `useTabsController`:
-  - an in-app navigation (a link, a card click) changes the router location, and
-    the controller records it on the active tab with `recordNavigation`;
-  - a tab action (switch, close, back, forward) changes the active tab's `path`
-    here, and the controller navigates the router to it.
-*/
-
-export interface BrowserTab {
-  id: string;
-  /** pathname + search, e.g. "/watch/abc" or "/search?q=cats". */
-  path: string;
-  /** Last resolved title; empty until the page has told us one. */
-  title: string;
-  back: string[];
-  forward: string[];
+/** A video a tab was showing when another tab took the player, kept so it can resume there. */
+export interface ParkedVideo {
+  videoId: string;
+  positionSeconds: number;
+  queue: VideoSummary[];
+  currentIndex: number;
+  playlistContext: PlaylistContext | null;
 }
 
-export interface OpenTabOptions {
-  /** Switch to the new tab. Default false, like a middle-click in a browser. */
-  activate?: boolean;
-  /** A title to show before the page has loaded (e.g. the video's title). */
-  title?: string;
+/** A tab's title, tied to the page it was read from so a stale one is never shown. */
+export interface TabTitle {
+  key: string;
+  text: string;
 }
 
 interface TabsState {
-  tabs: BrowserTab[];
+  tabs: TabHistory[];
   activeId: string;
-  /** Recently closed tabs, newest last, for Ctrl+Shift+T. */
-  closed: BrowserTab[];
-
-  openTab: (path?: string, options?: OpenTabOptions) => string;
-  closeTab: (id: string) => void;
-  closeOtherTabs: (id: string) => void;
-  reopenClosedTab: () => void;
+  /** How the active tab's current page was reached, for the router's navigation type. */
+  action: NavigationType;
+  /** Whether the last route change came from switching tabs rather than navigating in one. */
+  cause: "history" | "tab";
+  /** The tab whose video is in the window's player. */
+  playerTabId: string | null;
+  parked: Record<string, ParkedVideo>;
+  titles: Record<string, TabTitle>;
+  push: (to: To, state?: unknown) => void;
+  replace: (to: To, state?: unknown) => void;
+  go: (delta: number) => void;
+  /** Replaces the current page of any tab, active or not. */
+  replaceInTab: (id: string, to: To) => void;
+  openTab: (to: To, options?: { activate?: boolean }) => string;
+  /** A copy of the tab's back/forward list, opened in the background after it. */
+  duplicateTab: (id: string) => void;
   activateTab: (id: string) => void;
-  activateIndex: (index: number) => void;
-  cycleTab: (delta: number) => void;
+  closeTab: (id: string) => void;
+  /** Drops every other tab; a video still in the player then belongs to this one. */
+  keepOnlyTab: (id: string) => void;
+  setPlayerTab: (id: string | null) => void;
+  park: (id: string, video: ParkedVideo) => void;
+  unpark: (id: string) => void;
+  setTabTitle: (id: string, key: string, text: string) => void;
+  restoreTabs: (restored: Pick<TabsState, "tabs" | "activeId" | "parked" | "titles">) => void;
+  /** Recently closed tabs, newest last, for Reopen closed tab (Ctrl+Shift+T). */
+  closed: TabHistory[];
+  reopenClosedTab: () => void;
+  /** Drag-and-drop reordering in the top tab strip. */
   moveTab: (fromIndex: number, toIndex: number) => void;
-  /** Record a navigation that already happened in the router, on the active tab. */
-  recordNavigation: (path: string, kind: "push" | "replace") => void;
   /**
-   * Record a navigation on any tab, active or not. Browser tabs use this for
-   * navigations that happen inside the page; for the active tab the controller
-   * then moves the router to match.
+   * Records a navigation on any tab, active or not. Web tabs use this for
+   * navigations made inside the page; on the active tab the router follows.
    */
-  recordTabNavigation: (id: string, path: string, kind: "push" | "replace", title?: string) => void;
-  setTitle: (id: string, title: string) => void;
-  goBack: () => void;
-  goForward: () => void;
+  navigateTab: (id: string, to: To, kind: "push" | "replace") => void;
 }
 
-export const HOME_PATH = "/";
-const MAX_HISTORY = 50;
-const MAX_CLOSED = 10;
-const STORAGE_KEY = "flow.tabs.v1";
+/** How many closed tabs Reopen closed tab can bring back. */
+const MAX_CLOSED_TABS = 10;
 
-let idCounter = 0;
-function newId() {
-  idCounter += 1;
-  return `tab-${Date.now().toString(36)}-${idCounter}`;
+function initialTab(): TabHistory {
+  const { pathname, search, hash } = typeof window === "undefined"
+    ? { pathname: "/", search: "", hash: "" }
+    : window.location;
+  return { id: createTabId(), entries: [createEntry({ pathname, search, hash })], index: 0 };
 }
 
-function makeTab(path: string, title = ""): BrowserTab {
-  return { id: newId(), path, title, back: [], forward: [] };
+export function activeTab(state: Pick<TabsState, "tabs" | "activeId">): TabHistory {
+  const tab = state.tabs.find((candidate) => candidate.id === state.activeId) ?? state.tabs[0];
+  if (!tab) throw new Error("A window always has at least one tab");
+  return tab;
 }
 
-function capped(stack: string[]) {
-  return stack.length > MAX_HISTORY ? stack.slice(stack.length - MAX_HISTORY) : stack;
+function updateTab(state: TabsState, next: TabHistory): Pick<TabsState, "tabs"> {
+  return { tabs: state.tabs.map((tab) => (tab.id === next.id ? next : tab)) };
 }
 
-function updateTab(tabs: BrowserTab[], id: string, patch: (tab: BrowserTab) => BrowserTab) {
-  return tabs.map((tab) => (tab.id === id ? patch(tab) : tab));
+function withoutKey<T>(record: Record<string, T>, key: string): Record<string, T> {
+  if (!(key in record)) return record;
+  const { [key]: _removed, ...rest } = record;
+  return rest;
 }
 
-function isValidTab(value: unknown): value is BrowserTab {
-  if (!value || typeof value !== "object") return false;
-  const tab = value as Record<string, unknown>;
-  return (
-    typeof tab.id === "string" &&
-    typeof tab.path === "string" &&
-    tab.path.startsWith("/") &&
-    typeof tab.title === "string" &&
-    Array.isArray(tab.back) &&
-    Array.isArray(tab.forward)
-  );
-}
+const firstTab = initialTab();
 
-type PersistedTabs = Pick<TabsState, "tabs" | "activeId">;
-
-function loadPersisted(): PersistedTabs | null {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw) as Partial<PersistedTabs>;
-    const tabs = Array.isArray(parsed.tabs) ? parsed.tabs.filter(isValidTab) : [];
-    const first = tabs[0];
-    if (!first) return null;
-    const activeId = tabs.some((tab) => tab.id === parsed.activeId) ? (parsed.activeId as string) : first.id;
-    return { tabs, activeId };
-  } catch {
-    return null;
-  }
-}
-
-function initialState(): PersistedTabs {
-  const persisted = loadPersisted();
-  if (persisted) return persisted;
-  const first = makeTab(HOME_PATH);
-  return { tabs: [first], activeId: first.id };
-}
-
-export const useTabsStore = create<TabsState>()((set, get) => ({
-  ...initialState(),
+export const useTabsStore = create<TabsState>((set, get) => ({
+  tabs: [firstTab],
+  activeId: firstTab.id,
+  action: NavigationType.Pop,
+  cause: "history",
+  playerTabId: null,
+  parked: {},
+  titles: {},
   closed: [],
 
-  openTab: (path = HOME_PATH, options = {}) => {
-    const tab = makeTab(path, options.title ?? "");
-    set((state) => {
-      // New tabs open just after the active one, like a browser.
-      const activeIndex = state.tabs.findIndex((t) => t.id === state.activeId);
-      const tabs = [...state.tabs];
-      tabs.splice(activeIndex + 1, 0, tab);
-      return { tabs, activeId: options.activate ? tab.id : state.activeId };
+  push: (to, state) => {
+    const current = get();
+    set({
+      ...updateTab(current, pushEntry(activeTab(current), createEntry(to, state))),
+      action: NavigationType.Push,
+      cause: "history",
+    });
+  },
+
+  replace: (to, state) => {
+    const current = get();
+    set({
+      ...updateTab(current, replaceEntry(activeTab(current), createEntry(to, state))),
+      action: NavigationType.Replace,
+      cause: "history",
+    });
+  },
+
+  go: (delta) => {
+    const current = get();
+    const next = goInTab(activeTab(current), delta);
+    if (next) set({ ...updateTab(current, next), action: NavigationType.Pop, cause: "history" });
+  },
+
+  replaceInTab: (id, to) => {
+    const current = get();
+    const tab = current.tabs.find((candidate) => candidate.id === id);
+    if (!tab) return;
+    if (id === current.activeId) {
+      current.replace(to);
+      return;
+    }
+    set(updateTab(current, replaceEntry(tab, createEntry(to))));
+  },
+
+  openTab: (to, options) => {
+    const current = get();
+    const tab: TabHistory = { id: createTabId(), entries: [createEntry(to)], index: 0 };
+    set({
+      tabs: insertTabAfter(current.tabs, current.activeId, tab),
+      ...(options?.activate ? { activeId: tab.id, action: NavigationType.Push, cause: "tab" as const } : {}),
     });
     return tab.id;
   },
 
-  closeTab: (id) => {
-    set((state) => {
-      const index = state.tabs.findIndex((t) => t.id === id);
-      const closing = state.tabs[index];
-      if (!closing) return state;
-      const closed = [...state.closed, closing].slice(-MAX_CLOSED);
-      const remaining = state.tabs.filter((t) => t.id !== id);
-
-      // Closing the last tab leaves a fresh home tab rather than an empty window.
-      if (remaining.length === 0) {
-        const home = makeTab(HOME_PATH);
-        return { tabs: [home], activeId: home.id, closed };
-      }
-
-      if (state.activeId !== id) return { tabs: remaining, closed };
-      // The neighbour to the right takes over, or the left one at the end.
-      const next = remaining[Math.min(index, remaining.length - 1)] ?? remaining[0];
-      return { tabs: remaining, activeId: next?.id ?? state.activeId, closed };
-    });
-  },
-
-  closeOtherTabs: (id) => {
-    set((state) => {
-      const keep = state.tabs.find((t) => t.id === id);
-      if (!keep) return state;
-      const others = state.tabs.filter((t) => t.id !== id);
-      return { tabs: [keep], activeId: keep.id, closed: [...state.closed, ...others].slice(-MAX_CLOSED) };
-    });
-  },
-
-  reopenClosedTab: () => {
-    const { closed } = get();
-    const last = closed[closed.length - 1];
-    if (!last) return;
-    // A fresh id: the old one may have been reused by nothing, but there is no
-    // reason to rely on that.
-    const tab: BrowserTab = { ...last, id: newId() };
-    set((state) => {
-      const activeIndex = state.tabs.findIndex((t) => t.id === state.activeId);
-      const tabs = [...state.tabs];
-      tabs.splice(activeIndex + 1, 0, tab);
-      return { tabs, activeId: tab.id, closed: state.closed.slice(0, -1) };
+  duplicateTab: (id) => {
+    const current = get();
+    const source = current.tabs.find((tab) => tab.id === id);
+    if (!source) return;
+    const copy: TabHistory = {
+      id: createTabId(),
+      entries: source.entries.map((entry) => ({ ...entry, key: createEntryKey() })),
+      index: source.index,
+    };
+    const title = current.titles[id];
+    const copiedKey = copy.entries[copy.index]?.key;
+    set({
+      tabs: insertTabAfter(current.tabs, id, copy),
+      ...(title && copiedKey ? { titles: { ...current.titles, [copy.id]: { key: copiedKey, text: title.text } } } : {}),
     });
   },
 
   activateTab: (id) => {
-    if (get().tabs.some((t) => t.id === id)) set({ activeId: id });
+    const current = get();
+    if (id === current.activeId || !current.tabs.some((tab) => tab.id === id)) return;
+    set({ activeId: id, action: NavigationType.Pop, cause: "tab" });
   },
 
-  activateIndex: (index) => {
-    const { tabs } = get();
-    const tab = tabs[index];
-    if (tab) set({ activeId: tab.id });
+  closeTab: (id) => {
+    const current = get();
+    const neighbor = neighborTab(current.tabs, id);
+    if (!neighbor) return;
+    const closing = current.tabs.find((tab) => tab.id === id);
+    set({
+      tabs: current.tabs.filter((tab) => tab.id !== id),
+      closed: closing ? [...current.closed, closing].slice(-MAX_CLOSED_TABS) : current.closed,
+      parked: withoutKey(current.parked, id),
+      titles: withoutKey(current.titles, id),
+      playerTabId: current.playerTabId === id ? null : current.playerTabId,
+      ...(current.activeId === id ? { activeId: neighbor.id, action: NavigationType.Pop, cause: "tab" as const } : {}),
+    });
   },
 
-  cycleTab: (delta) => {
-    const { tabs, activeId } = get();
-    if (tabs.length < 2) return;
-    const index = tabs.findIndex((t) => t.id === activeId);
-    const next = tabs[(index + delta + tabs.length) % tabs.length];
-    if (next) set({ activeId: next.id });
+  keepOnlyTab: (id) => {
+    const current = get();
+    const tab = current.tabs.find((candidate) => candidate.id === id);
+    if (!tab) return;
+    const title = current.titles[id];
+    set({
+      tabs: [tab],
+      activeId: id,
+      closed: [],
+      parked: {},
+      titles: title ? { [id]: title } : {},
+      playerTabId: current.playerTabId ? id : null,
+    });
+  },
+
+  setPlayerTab: (id) => set({ playerTabId: id }),
+  park: (id, video) => set((current) => ({ parked: { ...current.parked, [id]: video } })),
+  unpark: (id) => set((current) => ({ parked: withoutKey(current.parked, id) })),
+
+  setTabTitle: (id, key, text) => {
+    const title = get().titles[id];
+    if (title?.key === key && title.text === text) return;
+    set((current) => ({ titles: { ...current.titles, [id]: { key, text } } }));
+  },
+
+  reopenClosedTab: () => {
+    const current = get();
+    const tab = current.closed[current.closed.length - 1];
+    if (!tab) return;
+    // A fresh id: the old one may still name a closed web page being torn down.
+    const reopened: TabHistory = { ...tab, id: createTabId() };
+    set({
+      tabs: insertTabAfter(current.tabs, current.activeId, reopened),
+      closed: current.closed.slice(0, -1),
+      activeId: reopened.id,
+      action: NavigationType.Pop,
+      cause: "tab",
+    });
   },
 
   moveTab: (fromIndex, toIndex) => {
-    set((state) => {
-      if (fromIndex === toIndex) return state;
-      if (fromIndex < 0 || fromIndex >= state.tabs.length) return state;
-      const tabs = [...state.tabs];
-      const [moved] = tabs.splice(fromIndex, 1);
-      if (!moved) return state;
-      tabs.splice(Math.max(0, Math.min(toIndex, tabs.length)), 0, moved);
-      return { tabs };
-    });
+    const current = get();
+    const count = current.tabs.length;
+    if (fromIndex === toIndex || fromIndex < 0 || toIndex < 0 || fromIndex >= count || toIndex >= count) return;
+    const tabs = [...current.tabs];
+    const [moved] = tabs.splice(fromIndex, 1);
+    if (!moved) return;
+    tabs.splice(toIndex, 0, moved);
+    set({ tabs });
   },
 
-  recordNavigation: (path, kind) => {
-    get().recordTabNavigation(get().activeId, path, kind);
-  },
-
-  recordTabNavigation: (id, path, kind, title = "") => {
-    set((state) => ({
-      tabs: updateTab(state.tabs, id, (tab) => {
-        if (tab.path === path) return tab;
-        if (kind === "replace") return { ...tab, path, title };
-        return {
-          ...tab,
-          path,
-          title,
-          back: capped([...tab.back, tab.path]),
-          forward: [],
-        };
-      }),
-    }));
-  },
-
-  setTitle: (id, title) => {
-    set((state) => {
-      const tab = state.tabs.find((t) => t.id === id);
-      if (!tab || tab.title === title) return state;
-      return { tabs: updateTab(state.tabs, id, (t) => ({ ...t, title })) };
-    });
-  },
-
-  goBack: () => {
-    set((state) => ({
-      tabs: updateTab(state.tabs, state.activeId, (tab) => {
-        const previous = tab.back[tab.back.length - 1];
-        if (previous === undefined) return tab;
-        return {
-          ...tab,
-          path: previous,
-          title: "",
-          back: tab.back.slice(0, -1),
-          forward: capped([...tab.forward, tab.path]),
-        };
-      }),
-    }));
-  },
-
-  goForward: () => {
-    set((state) => ({
-      tabs: updateTab(state.tabs, state.activeId, (tab) => {
-        const next = tab.forward[tab.forward.length - 1];
-        if (next === undefined) return tab;
-        return {
-          ...tab,
-          path: next,
-          title: "",
-          back: capped([...tab.back, tab.path]),
-          forward: tab.forward.slice(0, -1),
-        };
-      }),
-    }));
-  },
-}));
-
-/** The active tab. The store always holds at least one tab. */
-export function selectActiveTab(state: Pick<TabsState, "tabs" | "activeId">): BrowserTab {
-  return (state.tabs.find((t) => t.id === state.activeId) ?? state.tabs[0]) as BrowserTab;
-}
-
-/** The video id a tab is showing, or null when it isn't a watch page. */
-export function watchIdFromTabPath(path: string): string | null {
-  const match = path.match(/^\/watch\/([^/?#]+)/);
-  if (!match?.[1]) return null;
-  try {
-    return decodeURIComponent(match[1]);
-  } catch {
-    return match[1];
-  }
-}
-
-// Tabs survive a restart. Saved on change, outside React, so a write never
-// re-renders anything; a failed write (quota, private storage) is ignored.
-let saveTimer: ReturnType<typeof setTimeout> | null = null;
-useTabsStore.subscribe((state, previous) => {
-  if (state.tabs === previous.tabs && state.activeId === previous.activeId) return;
-  if (saveTimer) clearTimeout(saveTimer);
-  saveTimer = setTimeout(() => {
-    try {
-      const { tabs, activeId } = useTabsStore.getState();
-      localStorage.setItem(STORAGE_KEY, JSON.stringify({ tabs, activeId }));
-    } catch {
-      // Storage unavailable: tabs simply won't be restored next launch.
+  navigateTab: (id, to, kind) => {
+    const current = get();
+    if (id === current.activeId) {
+      if (kind === "push") current.push(to);
+      else current.replace(to);
+      return;
     }
-  }, 300);
-});
+    const tab = current.tabs.find((candidate) => candidate.id === id);
+    if (!tab) return;
+    const entry = createEntry(to);
+    set(updateTab(current, kind === "push" ? pushEntry(tab, entry) : replaceEntry(tab, entry)));
+  },
+
+  restoreTabs: (restored) =>
+    set({ ...restored, playerTabId: null, action: NavigationType.Pop, cause: "tab" }),
+}));

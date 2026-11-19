@@ -1,13 +1,20 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Maximize2, X } from "lucide-react";
+import { miniPlayerWidthPx } from "../../lib/miniPlayerSize";
+import { getString } from "../../lib/i18n/index";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { GripHorizontal, Maximize2, X } from "lucide-react";
+import { useMiniPlayerDrag } from "../../lib/useMiniPlayerDrag";
 import { useLocation, useNavigate } from "react-router-dom";
 
 import { useAppSettingsStore } from "../../store/useAppSettingsStore";
 import { usePlayerStore } from "../../store/usePlayerStore";
 import { SETTINGS } from "../../lib/settings/schema";
 import { FlowPlayerCore } from "./FlowPlayerCore";
+import { decideRouteChangePlayerAction, watchVideoIdFromPath } from "../../lib/watchRouteSync";
+import { expandPlayerInOwnerTab } from "../../lib/tabs/tabPlayback";
+import { useTabsStore } from "../../store/useTabsStore";
 import { useMediaSessionMetadata } from "../../lib/useMediaSessionMetadata";
-import { focusTabForVideo } from "../../lib/tabs";
+import { glideFrame } from "../../lib/theaterGlide";
+import { FullscreenPanelHost } from "./FullscreenPanelHost";
 
 type PlayerBounds = {
   top: number;
@@ -15,13 +22,6 @@ type PlayerBounds = {
   width: number;
   height: number;
 };
-
-const WATCH_ROUTE_RE = /^\/watch\/([^/?#]+)/;
-
-function watchVideoIdFromPath(pathname: string) {
-  const match = pathname.match(WATCH_ROUTE_RE);
-  return match?.[1] ? decodeURIComponent(match[1]) : null;
-}
 
 function readSlotBounds(): PlayerBounds | null {
   const slot = document.querySelector<HTMLElement>("[data-flow-watch-player-slot='true']");
@@ -46,10 +46,11 @@ export function GlobalVideoPlayer() {
   const navigate = useNavigate();
   const location = useLocation();
   const currentVideo = usePlayerStore((s) => s.currentVideo);
-  const isPlaying = usePlayerStore((s) => s.isPlaying);
   const videoPlayerMode = usePlayerStore((s) => s.videoPlayerMode);
   const isVideoFullscreen = usePlayerStore((s) => s.isVideoFullscreen);
   const isVideoFullscreenTransitioning = usePlayerStore((s) => s.isVideoFullscreenTransitioning);
+  const isTheaterMode = usePlayerStore((s) => s.isTheaterMode);
+  const setFullscreenPanel = usePlayerStore((s) => s.setFullscreenPanel);
   const watchPageCache = usePlayerStore((s) => s.watchPageCache);
   const enterVideoPip = usePlayerStore((s) => s.enterVideoPip);
   const expandVideoPlayer = usePlayerStore((s) => s.expandVideoPlayer);
@@ -63,6 +64,20 @@ export function GlobalVideoPlayer() {
   const previousVideoIdRef = useRef(currentVideo?.id ?? null);
 
   const isFloating = videoPlayerMode === "pip";
+  // The grip and buttons fade with the player's own controls, on the same idle rule. The buttons
+  // sit outside the player, so resting on them counts as leaving it; they hold themselves up then.
+  const playerChromeShown = usePlayerStore((s) => s.isPlayerChromeShown);
+  const [overButtons, setOverButtons] = useState(false);
+  const chromeShown = playerChromeShown || overButtons;
+  // Expand and Close remove the buttons under the pointer, so no pointerleave ever arrives.
+  useEffect(() => {
+    if (!isFloating) setOverButtons(false);
+  }, [isFloating]);
+  // Fullscreen keeps the "pip" mode, and its frame fills the window with insets.
+  const { isDragging, dragBinds } = useMiniPlayerDrag({
+    frameRef,
+    isFloating: isFloating && !isVideoFullscreen,
+  });
   // The pop-out window owns playback in this mode, so this window renders no
   // media element — two decoding the same video would double audio and CPU.
   const isPoppedOut = videoPlayerMode === "window";
@@ -103,9 +118,19 @@ export function GlobalVideoPlayer() {
       }
     };
 
+    // The page scrolls inside PageWrapper's <main>, which starts where the top bar ends.
+    let pageTop: number | null = null;
+    const publishBelowTopbar = (below: boolean) => {
+      const player = usePlayerStore.getState();
+      if (player.isPlayerBelowTopbar !== below) player.setIsPlayerBelowTopbar(below);
+    };
+
     const sync = () => {
       const next = readSlotBounds();
       if (!next) return;
+      pageTop ??=
+        document.querySelector("[data-flow-watch-player-slot='true']")?.closest("main")?.getBoundingClientRect().top ?? null;
+      publishBelowTopbar(pageTop !== null && next.top >= pageTop - 0.5);
       const prev = lastSlotBoundsRef.current;
       lastSlotBoundsRef.current = next;
       if (!boundsEqual(prev, next)) writeFrameBounds(next, prev);
@@ -118,6 +143,7 @@ export function GlobalVideoPlayer() {
     const slot = document.querySelector<HTMLElement>("[data-flow-watch-player-slot='true']");
     let resizeRaf: number | null = null;
     const onResize = () => {
+      pageTop = null;
       if (resizeRaf !== null) return;
       resizeRaf = window.requestAnimationFrame(() => {
         resizeRaf = null;
@@ -152,9 +178,10 @@ export function GlobalVideoPlayer() {
 
     return () => {
       observer.disconnect();
-      // Floating and fullscreen layouts position the frame with insets.
+      // Fullscreen uses insets, and the floating layout writes its own transform after this.
       if (frameRef.current) frameRef.current.style.transform = "";
       lastSlotBoundsRef.current = null;
+      publishBelowTopbar(false);
       if (resizeRaf !== null) window.cancelAnimationFrame(resizeRaf);
       window.removeEventListener("resize", onResize);
       document.removeEventListener("scroll", onScroll, { capture: true });
@@ -163,44 +190,53 @@ export function GlobalVideoPlayer() {
     };
   }, [isFloating, isPoppedOut, isVideoFullscreen, currentVideo?.id, location.pathname]);
 
+  // Every fullscreen starts with the whole picture; a panel opens only when asked for there.
+  useEffect(() => {
+    setFullscreenPanel(null);
+  }, [isVideoFullscreen, setFullscreenPanel]);
+
+  // Runs in the same commit as the layout swap, before the slot tracker snaps the frame.
+  const shownTheaterRef = useRef(isTheaterMode);
+  useLayoutEffect(() => {
+    if (shownTheaterRef.current === isTheaterMode) return;
+    shownTheaterRef.current = isTheaterMode;
+    const frame = frameRef.current;
+    if (!frame || isFloating || isPoppedOut || isVideoFullscreen) return;
+    const from = frame.getBoundingClientRect();
+    const to = readSlotBounds();
+    if (!to || from.width <= 0) return;
+    frame.style.transform = `translate3d(${to.left}px, ${to.top}px, 0)`;
+    frame.style.width = `${to.width}px`;
+    frame.style.height = `${to.height}px`;
+    lastSlotBoundsRef.current = to;
+    setSlotBounds(to);
+    glideFrame(frame, { top: from.top, left: from.left, width: from.width, height: from.height }, to, isTheaterMode);
+  }, [isTheaterMode, isFloating, isPoppedOut, isVideoFullscreen]);
+
   useEffect(() => {
     const previousPath = previousPathRef.current;
     if (previousPath === location.pathname) return;
     previousPathRef.current = location.pathname;
 
-    if (!currentVideo) return;
-
-    const prevWatchId = watchVideoIdFromPath(previousPath);
-    const nextWatchId = watchVideoIdFromPath(location.pathname);
-
-    if (nextWatchId === currentVideo.id) {
-      if (videoPlayerMode === "pip") expandVideoPlayer();
-      return;
-    }
-
-    if (nextWatchId === null && prevWatchId === currentVideo.id && videoPlayerMode === "watch") {
-      if (isPlaying && autoPipEnabled) {
-        enterVideoPip("auto");
-      } else {
-        dismissVideoPlayer();
-      }
-    }
-  }, [
-    location.pathname,
-    currentVideo,
-    videoPlayerMode,
-    isPlaying,
-    autoPipEnabled,
-    enterVideoPip,
-    expandVideoPlayer,
-    dismissVideoPlayer,
-  ]);
+    // The route renders in a transition, so values from this render can be a
+    // step behind the store; decide from the store as it is now.
+    const player = usePlayerStore.getState();
+    const action = decideRouteChangePlayerAction({
+      previousWatchId: watchVideoIdFromPath(previousPath),
+      nextWatchId: watchVideoIdFromPath(location.pathname),
+      currentVideoId: player.currentVideo?.id ?? null,
+      videoPlayerMode: player.videoPlayerMode,
+      autoPipEnabled,
+      tabSwitch: useTabsStore.getState().cause === "tab",
+    });
+    if (action === "expand") expandVideoPlayer();
+    else if (action === "enter-pip") enterVideoPip("auto");
+    else if (action === "dismiss") dismissVideoPlayer();
+  }, [location.pathname, autoPipEnabled, enterVideoPip, expandVideoPlayer, dismissVideoPlayer]);
 
   const expandFromFloating = useCallback(() => {
-    if (!currentVideo) return;
+    if (!currentVideo || expandPlayerInOwnerTab()) return;
     expandVideoPlayer();
-    // Return to the tab the video belongs to rather than reloading it here.
-    if (focusTabForVideo(currentVideo.id)) return;
     navigate(`/watch/${currentVideo.id}`);
   }, [currentVideo, expandVideoPlayer, navigate]);
 
@@ -209,6 +245,7 @@ export function GlobalVideoPlayer() {
     return () => window.removeEventListener("flow-video-expand-request", expandFromFloating);
   }, [expandFromFloating]);
 
+  const miniPlayerSize = useAppSettingsStore((state) => state.values[SETTINGS.MINI_PLAYER_SIZE]);
   const frameStyle = useMemo(() => {
     if (isVideoFullscreen) {
       return {
@@ -220,12 +257,12 @@ export function GlobalVideoPlayer() {
 
     if (isFloating) {
       return {
-        top: "auto",
-        left: "auto",
-        height: "auto",
-        bottom: "24px",
-        right: "24px",
-        width: "min(420px, calc(100vw - 32px))",
+        top: 0,
+        left: 0,
+        bottom: "auto",
+        right: "auto",
+        willChange: "transform",
+        width: `min(${miniPlayerWidthPx(miniPlayerSize)}px, calc(100vw - 32px))`,
         aspectRatio: "16 / 9",
       } as const;
     }
@@ -244,7 +281,7 @@ export function GlobalVideoPlayer() {
       height: `${slotBounds.height}px`,
       willChange: "transform",
     };
-  }, [isFloating, isVideoFullscreen, slotBounds]);
+  }, [isFloating, isVideoFullscreen, miniPlayerSize, slotBounds]);
 
   const videoIdForPlayer = currentVideo?.id ?? null;
   const playerNode = useMemo(
@@ -255,42 +292,98 @@ export function GlobalVideoPlayer() {
     [videoIdForPlayer, cachedDetails],
   );
 
+  const handleWheel = useCallback((e: React.WheelEvent<HTMLDivElement>) => {
+    if (isVideoFullscreen) return;
+
+    let el = e.target as HTMLElement | null;
+    const root = frameRef.current;
+    while (el && el !== root) {
+      if (el.scrollHeight > el.clientHeight) {
+        const style = window.getComputedStyle(el);
+        if (style.overflowY === "auto" || style.overflowY === "scroll") {
+          return;
+        }
+      }
+      el = el.parentElement;
+    }
+
+    const scroller =
+      document.querySelector<HTMLElement>("main.overflow-y-auto")
+      ?? document.querySelector<HTMLElement>("main");
+    if (!scroller) return;
+
+    let deltaY = e.deltaY;
+    let deltaX = e.deltaX;
+    if (e.deltaMode === 1) {
+      deltaY *= 20;
+      deltaX *= 20;
+    } else if (e.deltaMode === 2) {
+      deltaY *= scroller.clientHeight;
+      deltaX *= scroller.clientWidth;
+    }
+
+    scroller.scrollBy({
+      top: deltaY,
+      left: deltaX,
+      behavior: "auto",
+    });
+  }, [isVideoFullscreen]);
+
   if (!currentVideo || isPoppedOut) return null;
 
   return (
     <>
       <div
         ref={frameRef}
+        onWheel={handleWheel}
         className={
           isVideoFullscreen
-            ? "fixed z-[300] overflow-hidden bg-chrome-black"
+            ? "fixed z-[300] flex overflow-hidden bg-chrome-black"
             : isFloating
-            ? "group fixed z-50 overflow-hidden rounded-xl bg-chrome-black shadow-2xl ring-1 ring-chrome-white/10"
-            : "fixed z-30 bg-chrome-black"
+            ? `group fixed z-50 overflow-hidden rounded-xl border border-chrome-white/10 bg-chrome-black touch-none ${isDragging ? "cursor-grabbing select-none" : "cursor-grab"}`
+            : isTheaterMode
+            ? "fixed z-30 bg-chrome-black"
+            : "fixed z-30 rounded-xl bg-chrome-black"
         }
         style={frameStyle}
+        dir="ltr"
+        {...dragBinds}
       >
         {isFloating && (
-          <div className="absolute right-2 top-2 z-40 flex items-center gap-1 rounded-full bg-chrome-black/80 p-1 opacity-0 transition-opacity duration-200 ease-out group-hover:opacity-100">
-            <button
-              type="button"
-              aria-label="Expand video"
-              onClick={expandFromFloating}
-              className="grid h-7 w-7 place-items-center rounded-full text-chrome-white hover:bg-chrome-white/15"
+          <>
+            <div
+              className={`pointer-events-none absolute left-2 top-2 z-40 flex items-center justify-center rounded-full bg-chrome-black/80 px-2 py-1 text-chrome-white/60 transition-opacity duration-200 ease-out ${chromeShown ? "opacity-100" : "opacity-0"}`}
+              aria-hidden="true"
             >
-              <Maximize2 size={16} />
-            </button>
-            <button
-              type="button"
-              aria-label="Close video"
-              onClick={dismissVideoPlayer}
-              className="grid h-7 w-7 place-items-center rounded-full text-chrome-white hover:bg-chrome-white/15"
+              <GripHorizontal size={14} />
+            </div>
+            <div
+              data-drag-ignore="true"
+              onPointerEnter={() => setOverButtons(true)}
+              onPointerLeave={() => setOverButtons(false)}
+              className={`absolute right-2 top-2 z-40 flex items-center gap-1 rounded-full bg-chrome-black/80 p-1 transition-opacity duration-200 ease-out focus-within:pointer-events-auto focus-within:opacity-100 ${chromeShown ? "opacity-100" : "pointer-events-none opacity-0"}`}
             >
-              <X size={16} />
-            </button>
-          </div>
+              <button
+                type="button"
+                aria-label={getString('player_expand_video')}
+                onClick={expandFromFloating}
+                className="grid h-7 w-7 place-items-center rounded-full text-chrome-white transition-colors duration-200 ease-out hover:bg-chrome-white/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+              >
+                <Maximize2 size={16} />
+              </button>
+              <button
+                type="button"
+                aria-label={getString('player_close_video')}
+                onClick={dismissVideoPlayer}
+                className="grid h-7 w-7 place-items-center rounded-full text-chrome-white transition-colors duration-200 ease-out hover:bg-chrome-white/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+              >
+                <X size={16} />
+              </button>
+            </div>
+          </>
         )}
-        <div className="group h-full w-full">{playerNode}</div>
+        <div className={isVideoFullscreen ? "group h-full min-w-0 flex-1" : "group h-full w-full"}>{playerNode}</div>
+        {isVideoFullscreen && <FullscreenPanelHost />}
       </div>
 
       {isVideoFullscreenTransitioning && (

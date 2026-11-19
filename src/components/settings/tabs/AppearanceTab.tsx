@@ -1,33 +1,74 @@
-import { useState } from "react";
-import { Plus } from "lucide-react";
+import { useRef, useState, type ChangeEvent } from "react";
+import { SettingItem } from '../SettingItem';
+import { SettingsGroup } from '../SettingsGroup';
+import { Download, Plus, Upload } from "lucide-react";
 import { CustomThemeEditor } from "../../theme/CustomThemeEditor";
+import { ThemeFileSection } from "../../theme/ThemeFileSection";
 import { ThemePreview } from "../../theme/ThemePreview";
 import { Button } from "../../ui/Button";
 import { ToggleSwitch } from "../../ui/ToggleSwitch";
-import { useBoolPref } from "../../../lib/usePreference";
-import { SETTINGS } from "../../../lib/settings/schema";
+import { useBoolPref, usePreference } from "../../../lib/usePreference";
+import { NEW_SETTING_DAYS, SETTINGS } from "../../../lib/settings/schema";
+import { Select } from "../../ui/Select";
+import { confirmAction } from "../../../lib/dialogs";
 import { getString } from "../../../lib/i18n/index";
 import {
   BUILTIN_THEMES,
+  MAX_CUSTOM_THEMES,
   THEME_VARIANTS,
   createCustomTheme,
   type CustomThemeDefinition,
 } from "../../../lib/themes";
+import { THEME_FILE_ID } from "../../../lib/themeFile";
 import { useTheme } from "../../../lib/useTheme";
+import { useThemeTransfer } from "../../../lib/useThemeTransfer";
 import { IS_LINUX_RUNTIME } from "../../../lib/platform";
 import { GraphicsCompatibilitySection } from "../GraphicsCompatibilitySection";
+import { MAX_FONT_MB, fontImportMessage, importCustomFont } from "../../../lib/appFont";
+import { useUiStore } from "../../../store/useUiStore";
 
 export function AppearanceTab() {
   const {
     themeId,
     variant,
     customThemes,
+    followSystem,
     setTheme,
     setVariant,
     saveCustomThemes,
   } = useTheme();
   const [editingTheme, setEditingTheme] = useState<CustomThemeDefinition | null>(null);
+  const [, setFollowSystem] = useBoolPref(SETTINGS.THEME_FOLLOW_SYSTEM, false);
+  const [lightThemeId, setLightThemeId] = usePreference(SETTINGS.THEME_LIGHT_ID, "default");
+  const [darkThemeId, setDarkThemeId] = usePreference(SETTINGS.THEME_DARK_ID, "default");
+  const [darkStyle, setDarkStyle] = usePreference(SETTINGS.THEME_DARK_STYLE, "dark");
+  const [appFont, setAppFont] = usePreference(SETTINGS.APP_FONT, "inter");
+  const [customFontName] = usePreference(SETTINGS.APP_FONT_CUSTOM_NAME, "");
+  const fontInputRef = useRef<HTMLInputElement>(null);
+  const themeOptions = [...BUILTIN_THEMES, ...customThemes].map((theme) => ({ value: theme.id, label: theme.name }));
   const [expressiveSliders, setExpressiveSliders] = useBoolPref(SETTINGS.EXPRESSIVE_SLIDERS_ENABLED, true);
+  const [highlightNew, setHighlightNew] = useBoolPref(SETTINGS.HIGHLIGHT_NEW_SETTINGS, false);
+  const [highlightDays, setHighlightDays] = usePreference(SETTINGS.HIGHLIGHT_NEW_SETTINGS_DAYS, "7");
+  const { exportThemes, importThemes } = useThemeTransfer();
+  const importInputRef = useRef<HTMLInputElement>(null);
+  const usingThemeFile = themeId === THEME_FILE_ID;
+
+  const handleFontFile = (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    void importCustomFont(file).then((error) => {
+      const { showToast } = useUiStore.getState();
+      if (error) showToast({ variant: "error", message: fontImportMessage(error) });
+      else showToast({ message: getString("font_imported", file.name.replace(/\.(ttf|otf)$/i, "")) });
+    });
+  };
+
+  const handleImportFile = (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (file) void importThemes(file);
+  };
 
   const createTheme = () => {
     const id = `custom-${crypto.randomUUID()}`;
@@ -46,47 +87,122 @@ export function AppearanceTab() {
   };
 
   const deleteTheme = async (theme: CustomThemeDefinition) => {
-    if (!window.confirm(getString("theme_delete_confirm", theme.name))) return;
+    const confirmed = await confirmAction({
+      title: getString("settings_custom_theme_delete_title", theme.name),
+      message: getString("settings_custom_theme_delete_body"),
+      confirmLabel: getString("delete"),
+      destructive: true,
+    });
+    if (!confirmed) return;
     const saved = await saveCustomThemes(customThemes.filter((item) => item.id !== theme.id));
     if (saved && themeId === theme.id) await setTheme("default");
   };
 
   return (
-    <div className="mx-auto max-w-5xl pb-10">
+    <div className="pb-8">
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
           <h1 className="text-3xl font-bold tracking-tight text-chrome-neutral-100">{getString("settings_appearance")}</h1>
           <p className="mt-2 text-sm text-chrome-neutral-400">{getString("theme_page_description")}</p>
         </div>
-        <Button onClick={createTheme} disabled={customThemes.length >= 24}>
-          <Plus size={17} />
-          {getString("theme_create")}
-        </Button>
+        <div className="flex flex-wrap gap-2">
+          <Button variant="secondary" onClick={() => importInputRef.current?.click()} disabled={customThemes.length >= MAX_CUSTOM_THEMES}>
+            <Upload size={17} />
+            {getString("theme_import")}
+          </Button>
+          <Button variant="secondary" onClick={() => void exportThemes(customThemes)} disabled={customThemes.length === 0}>
+            <Download size={17} />
+            {getString("theme_export_all")}
+          </Button>
+          <Button onClick={createTheme} disabled={customThemes.length >= MAX_CUSTOM_THEMES}>
+            <Plus size={17} />
+            {getString("theme_create")}
+          </Button>
+          <input ref={importInputRef} type="file" accept=".json,application/json" onChange={handleImportFile} className="hidden" />
+        </div>
       </div>
 
       <section className="mt-8 rounded-2xl border border-chrome-neutral-800 bg-surface-container-low p-5">
         <div>
           <h2 className="text-base font-medium text-chrome-neutral-200">{getString("theme_variant")}</h2>
-          <p className="mt-1 text-sm text-chrome-neutral-400">{getString("theme_variant_description")}</p>
+          <p className="mt-1 text-sm text-chrome-neutral-400">
+            {getString(usingThemeFile ? "theme_variant_from_file" : "theme_variant_description")}
+          </p>
         </div>
         <div className="mt-4 flex flex-wrap gap-2">
           {THEME_VARIANTS.map((item) => (
-            <Button key={item} variant={variant === item ? "primary" : "secondary"} onClick={() => void setVariant(item)}>
+            <Button key={item} variant={variant === item ? "primary" : "secondary"} onClick={() => void setVariant(item)} disabled={usingThemeFile || followSystem}>
               {getString(`theme_variant_${item}` as Parameters<typeof getString>[0])}
             </Button>
           ))}
         </div>
       </section>
 
-      <section className="mt-8 flex items-center justify-between gap-6 rounded-2xl border border-chrome-neutral-800 bg-surface-container-low p-5">
-        <div className="min-w-0">
-          <h2 className="text-base font-medium text-chrome-neutral-200">{getString("settings_expressive_sliders")}</h2>
-          <p className="mt-1 text-sm text-chrome-neutral-400">{getString("settings_expressive_sliders_desc")}</p>
-        </div>
-        <ToggleSwitch checked={expressiveSliders} onChange={setExpressiveSliders} />
-      </section>
+      <div className="mt-8">
+        <SettingsGroup>
+          <SettingItem title={getString("settings_theme_follow_system")} description={getString("settings_theme_follow_system_desc")}>
+            <ToggleSwitch checked={followSystem} onChange={setFollowSystem} />
+          </SettingItem>
+          {followSystem && (
+            <>
+              <SettingItem title={getString("settings_theme_light_mode")}>
+                <Select value={lightThemeId} onChange={setLightThemeId} options={themeOptions} />
+              </SettingItem>
+              <SettingItem title={getString("settings_theme_dark_mode")}>
+                <Select value={darkThemeId} onChange={setDarkThemeId} options={themeOptions} />
+              </SettingItem>
+              <SettingItem title={getString("settings_theme_dark_style")}>
+                <Select
+                  value={darkStyle}
+                  onChange={setDarkStyle}
+                  options={[
+                    { value: "dark", label: getString("theme_variant_dark") },
+                    { value: "amoled", label: getString("theme_variant_amoled") },
+                  ]}
+                />
+              </SettingItem>
+            </>
+          )}
+          <SettingItem title={getString("settings_app_font")} description={getString("settings_app_font_desc")}>
+            <Select
+              value={appFont}
+              onChange={setAppFont}
+              options={[
+                { value: "inter", label: "Inter" },
+                { value: "system", label: getString("settings_app_font_system") },
+                { value: "condensed", label: getString("settings_app_font_condensed") },
+                { value: "serif", label: getString("settings_app_font_serif") },
+                ...(customFontName ? [{ value: "custom", label: getString("settings_app_font_custom", customFontName) }] : []),
+              ]}
+            />
+          </SettingItem>
+          <SettingItem title={getString("font_choose_file")} description={getString("font_choose_file_summary", MAX_FONT_MB)}>
+            <Button variant="secondary" onClick={() => fontInputRef.current?.click()}>
+              {getString("font_choose")}
+            </Button>
+            <input ref={fontInputRef} type="file" accept=".ttf,.otf" className="hidden" onChange={handleFontFile} />
+          </SettingItem>
+          <SettingItem title={getString("settings_expressive_sliders")} description={getString("settings_expressive_sliders_desc")}>
+            <ToggleSwitch checked={expressiveSliders} onChange={setExpressiveSliders} />
+          </SettingItem>
+          <SettingItem title={getString("settings_highlight_new")} description={getString("settings_highlight_new_desc")}>
+            <ToggleSwitch checked={highlightNew} onChange={setHighlightNew} />
+          </SettingItem>
+          {highlightNew && (
+            <SettingItem title={getString("settings_highlight_new_days")}>
+              <Select
+                value={highlightDays}
+                onChange={setHighlightDays}
+                options={NEW_SETTING_DAYS.map((days) => ({ value: days, label: getString("settings_highlight_new_days_option", days) }))}
+              />
+            </SettingItem>
+          )}
+        </SettingsGroup>
+      </div>
 
       {IS_LINUX_RUNTIME && <GraphicsCompatibilitySection />}
+
+      <ThemeFileSection />
 
       <section className="mt-8">
         <div className="flex items-end justify-between gap-4">
@@ -120,7 +236,7 @@ export function AppearanceTab() {
               <h2 className="text-base font-medium text-chrome-neutral-200">{getString("theme_custom")}</h2>
               <p className="mt-1 text-sm text-chrome-neutral-400">{getString("theme_custom_description")}</p>
             </div>
-            <span className="font-mono text-xs text-chrome-neutral-500">{customThemes.length}/24</span>
+            <span className="font-mono text-xs text-chrome-neutral-500">{customThemes.length}/{MAX_CUSTOM_THEMES}</span>
           </div>
           <div className="mt-4 grid grid-cols-1 gap-3 xl:grid-cols-2">
             {customThemes.map((theme) => (
@@ -148,6 +264,7 @@ export function AppearanceTab() {
           theme={editingTheme}
           onCancel={() => setEditingTheme(null)}
           onSave={(theme) => void saveTheme(theme)}
+          onExport={(theme) => void exportThemes([theme])}
         />
       )}
     </div>

@@ -5,6 +5,8 @@ import type { VideoSummary } from "../../types/video";
 
 interface VideoShelfProps {
   title?: string;
+  /** Shown at the end of the header, such as a "See all" button. */
+  action?: React.ReactNode;
   videos: VideoSummary[];
   onPlay: (video: VideoSummary) => void;
   onAddToQueue?: (video: VideoSummary) => void;
@@ -17,6 +19,7 @@ interface VideoShelfProps {
 
 export const VideoShelf: React.FC<VideoShelfProps> = ({
   title,
+  action,
   videos,
   onPlay,
   onAddToQueue,
@@ -34,15 +37,16 @@ export const VideoShelf: React.FC<VideoShelfProps> = ({
       {title ? (
         <div className="flex items-center justify-between">
           <h2 className="text-lg font-bold text-chrome-zinc-100 tracking-tight flex items-center gap-2">
-            <span>{title}</span>
+            <span dir="auto">{title}</span>
             <span className="text-xs text-chrome-zinc-500 font-semibold bg-surface-container-low border border-chrome-neutral-800 px-2 py-0.5 rounded-full">
               {videos.length}
             </span>
           </h2>
+          {action}
         </div>
       ) : null}
 
-      <ShelfScroller className="flex gap-4 px-3 -mx-3 pt-3 -mt-2 pb-3 snap-x">
+      <ShelfScroller className="flex gap-4 px-3 scroll-px-3 -mx-3 pt-3 -mt-2 pb-3 snap-x">
         {videos.map((video, index) => (
           <div
             key={getVideoKey ? getVideoKey(video, index) : `${video.id}-${index}`}

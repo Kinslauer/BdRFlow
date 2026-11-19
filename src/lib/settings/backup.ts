@@ -2,6 +2,7 @@ import { getSetting } from "../api/db";
 import { isTauriEnv } from "../api/env";
 import { invokeBackend } from "../api/errors";
 import { getAppMetadata, type AppMetadata } from "../appMetadata";
+import type { Profile } from "../api/profiles";
 import {
   SETTING_DEFINITIONS_BY_KEY,
   SETTING_EXPORT_KEYS,
@@ -46,6 +47,29 @@ export interface SettingsBackup {
   /** Present since schemaVersion 2: the backend export in the sync wire representation. */
   collections?: BackupCollections;
   deviceId?: string;
+}
+
+/** Android's master-backup manifest (`MasterBackupZip.kt`), as a top-level key. */
+export interface MasterManifest {
+  format: "flow-master";
+  version: 1;
+  defaultId: string;
+  profiles: Profile[];
+  /** Ids whose data is in this file. */
+  included: string[];
+}
+
+export interface ProfileBackupSlice {
+  settings: Record<string, unknown>;
+  collections: BackupCollections;
+}
+
+/** Default's data stays at the top level, where older builds read it; they ignore the rest. */
+export interface MasterBackup extends SettingsBackup {
+  manifest: MasterManifest;
+  profiles: Record<string, ProfileBackupSlice>;
+  /** WebP photos as base64, by profile id. */
+  profile_avatars: Record<string, string>;
 }
 
 export interface ValidatedSettingsBackup {
@@ -151,13 +175,6 @@ export function extractBackupCollections(value: unknown): BackupCollections | nu
     if (Array.isArray(records)) collections[key] = records;
   }
   return Object.keys(collections).length > 0 ? collections : null;
-}
-
-export async function buildSettingsBackupJson(
-  scope: SettingsBackupScope = "APP_DATA",
-): Promise<string> {
-  const backup = await buildSettingsBackup(scope);
-  return JSON.stringify(backup, null, 2);
 }
 
 export function validateSettingsBackup(value: unknown): ValidatedSettingsBackup | null {
