@@ -1,4 +1,5 @@
 import { useCallback, useMemo } from "react";
+import { clearWatchProgress } from "../lib/watchProgress";
 import { create } from "zustand";
 import { getSetting, setSetting, addWatchRecord } from "../lib/api/db";
 import {
@@ -8,10 +9,13 @@ import {
   unblockChannel as apiUnblockChannel,
 } from "../lib/api/recommendation";
 import { shouldRecordWatchHistory } from "../lib/deepFlow";
+import { recapAction } from "../lib/recap/recapQueue";
 import { isKnownShort } from "../lib/videoKind";
 import { isMusicVideo } from "../lib/utils";
 import type { VideoSummary } from "../types/video";
 import { SETTINGS } from "../lib/settings/schema";
+import { useAiListMatcher } from "../lib/aiList/useAiList";
+import type { AiListMatcher } from "../lib/aiList/matcher";
 import { useAppSettingsStore } from "./useAppSettingsStore";
 
 // Global recommendation-feedback state shared by every video card, mirroring the mobile
@@ -36,10 +40,12 @@ interface FeedActionsState {
   notInterested: (video: VideoSummary) => Promise<void>;
   /** Hides a video from every feed, e.g. after a thumbs-down on the watch page. */
   hideVideo: (videoId: string) => void;
-  blockChannel: (video: VideoSummary) => Promise<void>;
+  blockChannel: (video: Pick<VideoSummary, "channelId" | "channelName">) => Promise<void>;
   /** Lets a channel back into every feed: unblocked, and no longer set aside by "not interested". */
   unblockChannel: (channelId: string) => Promise<void>;
   markWatched: (video: VideoSummary) => Promise<void>;
+  /** Takes the mark away and clears how far it was watched; the history entry stays. */
+  markUnwatched: (videoId: string) => Promise<void>;
   moreLikeThis: (video: VideoSummary) => Promise<void>;
   addBlockedKeyword: (keyword: string) => void;
   removeBlockedKeyword: (keyword: string) => void;
@@ -189,6 +195,7 @@ export const useFeedActionsStore = create<FeedActionsState>((set, get) => {
           false,
           m.isShort,
         );
+        recapAction("NOT_INTERESTED");
       } catch (e) {
         console.warn("Failed to record not interested", e);
         set(previous);
@@ -210,6 +217,7 @@ export const useFeedActionsStore = create<FeedActionsState>((set, get) => {
       persist();
       try {
         await apiBlockChannel(channelId, video.channelName);
+        recapAction("BLOCK_CHANNEL");
       } catch (e) {
         console.warn("Failed to block channel", e);
         set({ blockedChannelIds: previous });
@@ -238,6 +246,21 @@ export const useFeedActionsStore = create<FeedActionsState>((set, get) => {
         set(previous);
         persist();
         throw e;
+      }
+    },
+
+    markUnwatched: async (videoId) => {
+      const previous = get().watchedVideoIds;
+      const next = new Set(previous);
+      next.delete(videoId);
+      set({ watchedVideoIds: next });
+      persist();
+      try {
+        await clearWatchProgress(videoId);
+      } catch (error) {
+        set({ watchedVideoIds: previous });
+        persist();
+        throw error;
       }
     },
 
@@ -317,9 +340,26 @@ export const useFeedActionsStore = create<FeedActionsState>((set, get) => {
   };
 });
 
-/// Reactive predicate for feeds: true when a video should be hidden (dismissed, watched, or its
-/// channel blocked). Subscribes to the sets so feeds re-filter the instant an action fires.
+/**
+ * True when the AiSList filter hides the video's channel. The card's handle, or a collaboration
+ * lead's, also teaches the matcher that channel's id for cards that carry no handle.
+ */
+export function hiddenAsAi(
+  matcher: AiListMatcher,
+  video: Pick<VideoSummary, "channelId" | "channelHandle" | "collaborators">,
+): boolean {
+  if (!matcher.isActive) return false;
+  const channelId = cleanChannelId(video.channelId);
+  const handle =
+    video.channelHandle ?? video.collaborators?.find((collaborator) => collaborator.channelId === channelId)?.handle;
+  return matcher.verdict(channelId, handle) === "block";
+}
+
+/// Reactive predicate for feeds: true when a video should be hidden (dismissed, watched, its
+/// channel blocked, or hidden by the AI channel list). Subscribes to the sets so feeds re-filter
+/// the instant an action fires.
 export function useFeedHiddenFilter({ hideWatched = true }: { hideWatched?: boolean } = {}) {
+  const aiMatcher = useAiListMatcher();
   const dismissed = useFeedActionsStore((s) => s.dismissedVideoIds);
   const blocked = useFeedActionsStore((s) => s.blockedChannelIds);
   const suppressed = useFeedActionsStore((s) => s.suppressedChannelIds);
@@ -334,9 +374,10 @@ export function useFeedHiddenFilter({ hideWatched = true }: { hideWatched?: bool
       if (dismissed.has(video.id) || (hideWatched && watched.has(video.id))) return true;
       if (hideBlocked && matchBlockedKeyword(video, keywords)) return true;
       const channelId = cleanChannelId(video.channelId);
-      return channelId.length > 0 && (blocked.has(channelId) || activeSuppressed.has(channelId));
+      if (channelId.length > 0 && (blocked.has(channelId) || activeSuppressed.has(channelId))) return true;
+      return hiddenAsAi(aiMatcher, video);
     },
-    [dismissed, blocked, activeSuppressed, watched, hideWatched, hideBlocked, keywords],
+    [dismissed, blocked, activeSuppressed, watched, hideWatched, hideBlocked, keywords, aiMatcher],
   );
 }
 

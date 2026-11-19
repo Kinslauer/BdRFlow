@@ -11,7 +11,7 @@ export function WatchErrorState({ message, onRetryWithProxy, onGoBack }: WatchEr
           <AlertTriangle className="h-8 w-8" />
         </div>
         <h2 className="text-xl font-bold tracking-tight text-chrome-neutral-100">{getString("watch_error_title")}</h2>
-        <p className="mt-2 text-sm leading-relaxed text-chrome-neutral-400">{message}</p>
+        <p className="mt-2 select-text text-sm leading-relaxed text-chrome-neutral-400">{message}</p>
         <div className="mt-6 flex flex-col gap-2 sm:flex-row sm:justify-center">
           {onRetryWithProxy && (
             <Button variant="primary" onClick={onRetryWithProxy}>
@@ -20,7 +20,7 @@ export function WatchErrorState({ message, onRetryWithProxy, onGoBack }: WatchEr
             </Button>
           )}
           <Button variant="tonal" onClick={onGoBack}>
-            <ArrowLeft size={18} />
+            <ArrowLeft className="rtl:-scale-x-100" size={18} />
             {getString("watch_go_back")}
           </Button>
         </div>

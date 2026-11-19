@@ -38,18 +38,6 @@ export function decodeHtmlEntities(text: string): string {
   return out;
 }
 
-export function cleanTitle(title: string): string {
-  return title
-    .replace(/\s*[([].*?[)\]]/g, "")
-    .replace(/\b(official video|official audio|lyrics|lyric video|hq|hd|audio|video|clip)\b/gi, "")
-    .trim();
-}
-
-export function cleanArtist(artist: string): string {
-  const head = artist.replace(/\s*-\s*Topic/gi, "").split(/\s+(?:feat\.?|ft\.?|featuring|&|,|vs\.?)\s+/i)[0];
-  return (head ?? artist).trim();
-}
-
 const CREDIT_PREFIXES = [
   "synced by",
   "lyrics by",
@@ -66,12 +54,11 @@ export function filterCreditLines(entries: LyricsEntry[]): LyricsEntry[] {
   });
 }
 
-export function findCurrentLineIndex(lines: LyricsEntry[], position: number): number {
-  for (let i = 0; i < lines.length; i++) {
-    if (lines[i]!.time >= position + 300) return i - 1;
-  }
-  return lines.length - 1;
-}
+// KuGou answers instrumentals with one line, "纯音乐，请欣赏" ("pure music, please enjoy"), not with no lyrics.
+const INSTRUMENTAL_NOTICE = /^纯音乐[，,]?\s*请欣赏$/;
+
+export const isInstrumentalNotice = (entries: LyricsEntry[]): boolean =>
+  entries.length > 0 && entries.every((entry) => INSTRUMENTAL_NOTICE.test(entry.text.trim()));
 
 export function normalizeEntries(entries: LyricsEntry[]): LyricsEntry[] {
   return entries.map((e) => ({
@@ -112,14 +99,51 @@ function parseMetrolistWordTimestamps(wordData: string): WordTimestamp[] {
 
 const isWordDataLine = (line: string): boolean => line.startsWith("<") && line.endsWith(">");
 
+interface LineMarkers {
+  text: string;
+  agent: string | null;
+  isBackground: boolean;
+}
+
+/** A line's `{agent:v1}` singer and `{bg}` background markers, taken out of its text. */
+export function lineMarkers(content: string): LineMarkers {
+  let text = content;
+  const agentMatch = text.match(AGENT_RE);
+  if (agentMatch) text = text.replace(AGENT_RE, "");
+  const isBackground = BACKGROUND_RE.test(text);
+  if (isBackground) text = text.replace(BACKGROUND_RE, "");
+  return { text, agent: agentMatch?.[1] ?? null, isBackground };
+}
+
+/** Lines saved before the markers were parsed still carry them in their text. */
+export function withoutLineMarkers(entries: LyricsEntry[]): LyricsEntry[] {
+  if (!entries.some((entry) => AGENT_RE.test(entry.text) || BACKGROUND_RE.test(entry.text))) return entries;
+  let lastNonBgAgent: string | null = null;
+  return entries.map((entry) => {
+    const markers = lineMarkers(entry.text);
+    if (!markers.isBackground && markers.agent !== null) lastNonBgAgent = markers.agent;
+    if (markers.text === entry.text) return entry;
+    return {
+      ...entry,
+      text: markers.text.trim(),
+      agent: entry.agent ?? (markers.isBackground ? (lastNonBgAgent ?? "bg") : markers.agent),
+      isBackground: entry.isBackground || markers.isBackground,
+    };
+  });
+}
+
 function parseStandardLyrics(lines: string[]): LyricsEntry[] {
   const out: LyricsEntry[] = [];
+  let lastNonBgAgent: string | null = null;
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]!;
     if (isWordDataLine(line)) continue;
     const matches = [...line.matchAll(TIME_REGEX)];
     if (matches.length === 0) continue;
-    const content = line.replace(TIME_REGEX, "").trim();
+    const markers = lineMarkers(line.replace(TIME_REGEX, "").trim());
+    const content = markers.text.trim();
+    if (!markers.isBackground && markers.agent !== null) lastNonBgAgent = markers.agent;
+    const agent = markers.isBackground ? (lastNonBgAgent ?? "bg") : markers.agent;
 
     let words: WordTimestamp[] | undefined;
     const next = lines[i + 1];
@@ -129,7 +153,7 @@ function parseStandardLyrics(lines: string[]): LyricsEntry[] {
 
     for (const m of matches) {
       const time = tsToMs(m[1], m[2], m[3]);
-      out.push({ time, text: content, words: words ?? null });
+      out.push({ time, text: content, words: words ?? null, agent, isBackground: markers.isBackground });
     }
   }
   return out.sort((a, b) => a.time - b.time);
@@ -220,18 +244,7 @@ function parseRichSyncLyrics(lines: string[]): LyricsEntry[] {
     const std = line.match(RICH_SYNC_LINE_RE);
     if (std) {
       const time = tsToMs(std[1], std[2], std[3]);
-      let content = std[4] ?? "";
-      let agent: string | null = null;
-      const am = content.match(AGENT_RE);
-      if (am) {
-        agent = am[1] ?? null;
-        content = content.replace(AGENT_RE, "");
-      }
-      let isBackground = false;
-      if (BACKGROUND_RE.test(content)) {
-        isBackground = true;
-        content = content.replace(BACKGROUND_RE, "");
-      }
+      const { text: content, agent, isBackground } = lineMarkers(std[4] ?? "");
       const words = parseRichSyncWords(content, index, lines);
       if (!isBackground && agent && agent.trim()) lastNonBgAgent = agent;
       out.push({ time, text: stripRichSyncTags(content), words, agent, isBackground });
@@ -281,5 +294,7 @@ export function parseLyrics(lyrics: string): LyricsEntry[] {
     );
   });
 
-  return isRichSync ? parseRichSyncLyrics(lines) : parseStandardLyrics(lines);
+  const entries = isRichSync ? parseRichSyncLyrics(lines) : parseStandardLyrics(lines);
+  // A timed blank line marks an instrumental break; lyrics made only of those are no lyrics.
+  return entries.some((entry) => entry.text.trim()) ? entries : [];
 }

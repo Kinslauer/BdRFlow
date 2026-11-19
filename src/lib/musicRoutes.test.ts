@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { musicSeeAllRoute } from './musicRoutes';
+import { downloadedMusicCollectionPath, isMusicRoute, musicSeeAllRoute } from './musicRoutes';
 import type { YTItem } from '../types/music';
 
 const song: YTItem = {
@@ -24,5 +24,25 @@ describe('musicSeeAllRoute', () => {
   it('sends other browse endpoints to the generic grid', () => {
     const route = musicSeeAllRoute('FEmusic_moods_and_genres_category', 'x', 'Chill');
     expect(route).toBe('/music/browse?browseId=FEmusic_moods_and_genres_category&params=x&title=Chill');
+  });
+});
+
+describe('isMusicRoute', () => {
+  it('matches the Music pages only', () => {
+    expect(isMusicRoute('/music')).toBe(true);
+    expect(isMusicRoute('/music/album/MPRE1')).toBe(true);
+    expect(isMusicRoute('/music?tab=library')).toBe(true);
+    expect(isMusicRoute('/musical')).toBe(false);
+    expect(isMusicRoute('/watch/abc')).toBe(false);
+  });
+});
+
+describe('downloadedMusicCollectionPath', () => {
+  it('opens playlists on the playlist page and everything else as an album', () => {
+    expect(downloadedMusicCollectionPath('PLabc')).toBe('/music/playlist/PLabc');
+    expect(downloadedMusicCollectionPath('RDCLAK5')).toBe('/music/playlist/RDCLAK5');
+    expect(downloadedMusicCollectionPath('VLPLabc')).toBe('/music/playlist/VLPLabc');
+    expect(downloadedMusicCollectionPath('MPREb_x')).toBe('/music/album/MPREb_x');
+    expect(downloadedMusicCollectionPath('album-123')).toBe('/music/album/album-123');
   });
 });

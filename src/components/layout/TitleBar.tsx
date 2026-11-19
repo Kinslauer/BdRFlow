@@ -1,4 +1,4 @@
-import { useTranslation } from "react-i18next";
+import { getString } from "../../lib/i18n/index";
 import { Copy, Minus, Square, X } from "lucide-react";
 import { IS_MACOS_RUNTIME } from "../../lib/platform";
 import { useNativeWindowTitle } from "../../lib/useNativeWindowTitle";
@@ -6,16 +6,17 @@ import { useResolvedWindowTitle } from "../../lib/useResolvedWindowTitle";
 import { useWindowControls } from "../../lib/useWindowControls";
 import { WindowResizeEdges } from "../ui/WindowResizeEdges";
 import { TabStrip } from "../tabs/TabStrip";
+import { useTabsEnabled } from "../../lib/tabs/tabsEnabled";
 
 function cx(...classes: Array<string | false | null | undefined>) {
   return classes.filter(Boolean).join(" ");
 }
 
-export function TitleBar({ showTabs = false }: { showTabs?: boolean }) {
-  const { t } = useTranslation();
+export function TitleBar() {
   const { text, section } = useResolvedWindowTitle();
   const { isMaximized, isFullscreen, minimize, toggleMaximize, close } = useWindowControls();
-  useNativeWindowTitle(text || t("appName"));
+  const showTabs = useTabsEnabled();
+  useNativeWindowTitle(text || getString('app_name'));
 
   if (IS_MACOS_RUNTIME) return null;
 
@@ -32,7 +33,7 @@ export function TitleBar({ showTabs = false }: { showTabs?: boolean }) {
         ) : (
           <div className="pointer-events-none absolute inset-0 flex items-center justify-center px-40">
             {text && (
-              <span
+              <span dir="auto"
                 className={cx(
                   "max-w-full truncate text-center text-xs",
                   section
@@ -47,10 +48,10 @@ export function TitleBar({ showTabs = false }: { showTabs?: boolean }) {
         )}
 
         {/* Window controls */}
-        <div className="relative z-10 ml-auto flex h-full shrink-0 items-center">
+        <div className="relative z-10 ms-auto flex h-full shrink-0 items-center">
           <button
             type="button"
-            aria-label={t("windowMinimize")}
+            aria-label={getString('window_minimize')}
             onClick={minimize}
             className={`${controlBtn} hover:bg-on-surface/10 hover:text-on-surface`}
           >
@@ -58,7 +59,7 @@ export function TitleBar({ showTabs = false }: { showTabs?: boolean }) {
           </button>
           <button
             type="button"
-            aria-label={t(isMaximized ? "windowRestore" : "windowMaximize")}
+            aria-label={getString(isMaximized ? 'window_restore' : 'window_maximize')}
             onClick={toggleMaximize}
             className={`${controlBtn} hover:bg-on-surface/10 hover:text-on-surface`}
           >
@@ -66,7 +67,7 @@ export function TitleBar({ showTabs = false }: { showTabs?: boolean }) {
           </button>
           <button
             type="button"
-            aria-label={t("windowClose")}
+            aria-label={getString('window_close')}
             onClick={close}
             className={`${controlBtn} hover:bg-primary hover:text-chrome-white`}
           >

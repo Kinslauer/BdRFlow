@@ -3,10 +3,20 @@ use serde_json::{Value, json};
 
 use crate::api::innertube::InnertubeClient;
 use crate::api::innertube::core::clients;
-use crate::api::innertube::core::utils::normalize_youtube_image_url;
+use crate::api::innertube::json::text::text_of;
+use crate::api::innertube::json::thumbnail::{largest_url, normalize_youtube_image_url};
 use crate::errors::AppResult;
 use crate::models::shorts::{ShortItem, ShortsFeed};
 use crate::streaming::sabr::pb::PbWriter;
+
+/// How many reels of a page get their title and channel looked up before
+/// ranking: the sequence names reels and nothing else, and each lookup is a
+/// request of its own.
+const OVERLAY_FILL_LIMIT: usize = 10;
+const OVERLAY_CONCURRENCY: usize = 5;
+/// The whole lookup's budget, so a slow connection costs titles rather than
+/// the reel lane: lookups still running at the deadline are dropped.
+const OVERLAY_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// `sequenceParams` sentinel for the home Shorts feed (no seed video). Raw base64
 /// (`=`, not URL-encoded `%3D`) — the JSON body must carry the decoded token.
@@ -27,47 +37,166 @@ impl InnertubeClient {
     ///
     /// Home feed: `sequence_params = None`. Seeded from a video:
     /// `sequence_params = Some(encode_reel_seed_params(id))`. Next page: the page's token.
-    /// ANDROID is used because it returns the portrait overlay renderers.
+    /// IOS is asked first: its page is a few kilobytes per reel, where ANDROID's
+    /// carries a prefetch of every reel's player response and runs to megabytes
+    /// for the same reels (Flow for Android measured the same). Neither names a
+    /// reel's title or channel: see [`Self::fill_reel_overlays`].
     pub async fn get_shorts_sequence(
         &self,
         sequence_params: Option<String>,
         region: Option<String>,
     ) -> AppResult<ShortsFeed> {
-        let started = std::time::Instant::now();
         let visitor_data = self.fetch_visitor_data().await;
-        tracing::info!(
-            elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
-            resolved = visitor_data.is_some(),
-            "[shorts] reel visitor_data step"
-        );
         let region = region
             .as_deref()
             .map(str::trim)
             .map(str::to_ascii_uppercase)
             .filter(|value| value.len() == 2 && value.chars().all(|c| c.is_ascii_alphabetic()));
-        let context = clients::ANDROID.context(visitor_data.as_deref(), region.as_deref());
-
         let payload_params = sequence_params.unwrap_or_else(|| HOME_SEQUENCE_PARAMS.to_string());
-        let mut payload = json!({ "context": context, "sequenceParams": payload_params });
 
-        let res = self
-            .post_innertube("reel/reel_watch_sequence", &clients::ANDROID, &mut payload)
-            .await?;
-
-        let feed = parse_reel_sequence(&res);
-        if feed.items.is_empty() {
-            tracing::warn!(
-                "[shorts] reel_watch_sequence parsed 0 items. top-level keys: {:?}",
-                res.as_object()
-                    .map(|obj| obj.keys().cloned().collect::<Vec<_>>())
-            );
-        } else {
-            tracing::info!(
-                "[shorts] reel_watch_sequence parsed {} items",
-                feed.items.len()
-            );
+        let mut feed = ShortsFeed::default();
+        let mut last_error = None;
+        for client in [&clients::IOS, &clients::ANDROID] {
+            let mut payload = json!({
+                "context": client.context(visitor_data.as_deref(), region.as_deref()),
+                "sequenceParams": payload_params,
+            });
+            match self
+                .post_innertube("reel/reel_watch_sequence", client, &mut payload)
+                .await
+            {
+                Ok(res) => {
+                    feed = parse_reel_sequence(&res);
+                    if !feed.items.is_empty() {
+                        tracing::info!(
+                            client = client.name,
+                            items = feed.items.len(),
+                            "[shorts] reel sequence page"
+                        );
+                        break;
+                    }
+                }
+                Err(error) => last_error = Some(error),
+            }
+        }
+        if feed.items.is_empty()
+            && let Some(error) = last_error
+        {
+            return Err(error);
         }
         Ok(feed)
+    }
+
+    /// Title, channel and counts for the first reels that came without them,
+    /// from `reel/reel_item_watch` with the player response left out.
+    pub async fn fill_reel_overlays(&self, items: &mut [ShortItem]) {
+        let missing: Vec<(usize, String)> = items
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| item.channel_id.is_none())
+            .take(OVERLAY_FILL_LIMIT)
+            .map(|(index, item)| (index, item.id.clone()))
+            .collect();
+        let deadline = tokio::time::Instant::now() + OVERLAY_BUDGET;
+        let overlays = crate::api::http::bounded_join(
+            missing,
+            OVERLAY_CONCURRENCY,
+            |(index, video_id)| async move {
+                let mut payload = json!({
+                    "playerRequest": { "videoId": video_id },
+                    "disablePlayerResponse": true,
+                });
+                let answer = tokio::time::timeout_at(
+                    deadline,
+                    self.post_innertube("reel/reel_item_watch", &clients::WEB, &mut payload),
+                )
+                .await;
+                (index, answer.ok().and_then(Result::ok))
+            },
+        )
+        .await;
+        for (index, answer) in overlays {
+            if let (Some(item), Some(answer)) = (items.get_mut(index), answer) {
+                apply_reel_overlay(item, &answer);
+            }
+        }
+    }
+}
+
+/// Fill what `reel_item_watch` says about a reel into `item`, keeping anything
+/// the sequence already named. Its overlay is a view model on WEB.
+fn apply_reel_overlay(item: &mut ShortItem, answer: &Value) {
+    let overlay = &answer["overlay"]["reelPlayerOverlayRenderer"];
+    let view = &overlay["playerOverlay"]["reelPlayerOverlayViewModel"];
+    let metadata = view["metapanel"]["reelMetapanelViewModel"]["metadataItems"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let buttons = view["actionBar"]["reelActionBarViewModel"]["buttonViewModels"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let channel_bar = metadata
+        .iter()
+        .find_map(|entry| entry.get("reelChannelBarViewModel"));
+    if item.linked_video_id.is_none()
+        && let Some((id, title)) = linked_video(metadata)
+    {
+        item.linked_video_id = Some(id);
+        item.linked_video_title = title;
+    }
+    if let Some(title) = metadata
+        .iter()
+        .find_map(|entry| entry["shortsVideoTitleViewModel"]["text"]["content"].as_str())
+        .filter(|title| !title.trim().is_empty())
+        && (item.title.is_empty() || item.title == "Short")
+    {
+        item.title = title.trim().to_string();
+    }
+    if let Some(bar) = channel_bar {
+        if item.channel_id.is_none() {
+            item.channel_id = bar["channelName"]["commandRuns"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find_map(|run| {
+                    run["onTap"]["innertubeCommand"]["browseEndpoint"]["browseId"].as_str()
+                })
+                .map(ToOwned::to_owned);
+        }
+        if item.channel_name.is_empty()
+            && let Some(name) = bar["channelName"]["content"].as_str()
+        {
+            item.channel_name = name.to_string();
+        }
+        if item.channel_avatar_url.is_none() {
+            item.channel_avatar_url = largest_url(
+                &bar["decoratedAvatarViewModel"]["decoratedAvatarViewModel"]["avatar"]["avatarViewModel"]["image"]
+                    ["sources"],
+            )
+            .map(|url| normalize_youtube_image_url(&url));
+        }
+    }
+    if item.like_count_text.is_none() {
+        item.like_count_text = buttons.iter().find_map(|button| {
+            button["likeButtonViewModel"]["toggleButtonViewModel"]["toggleButtonViewModel"]["defaultButtonViewModel"]
+                ["buttonViewModel"]["title"]
+                .as_str()
+                .map(ToOwned::to_owned)
+        });
+    }
+    if item.comment_count_text.is_none() {
+        item.comment_count_text = buttons
+            .iter()
+            .map(|button| &button["buttonViewModel"])
+            .find(|button| button["iconName"] == "SHORTS_COMMENT")
+            .and_then(|button| button["title"].as_str())
+            .map(ToOwned::to_owned);
+    }
+    if item.published_text.is_none() {
+        item.published_text = text_of(
+            &overlay["reelPlayerHeaderSupportedRenderers"]["reelPlayerHeaderRenderer"]["timestampText"],
+        );
     }
 }
 
@@ -81,8 +210,13 @@ fn parse_reel_sequence(res: &Value) -> ShortsFeed {
             if endpoint.is_null() {
                 continue;
             }
-            // Ads carry `adClientParams` on the endpoint or the entry itself.
-            if !endpoint["adClientParams"].is_null() || !entry["adClientParams"].is_null() {
+            // Ads are named by `videoType` on the app clients and carry
+            // `adClientParams` everywhere; they are ordinary uploads to the
+            // player, so nothing later could tell them apart.
+            if endpoint["videoType"] == "REEL_VIDEO_TYPE_AD"
+                || !endpoint["adClientParams"].is_null()
+                || !entry["adClientParams"].is_null()
+            {
                 continue;
             }
             let Some(video_id) = endpoint["videoId"].as_str().filter(|id| !id.is_empty()) else {
@@ -121,8 +255,8 @@ fn parse_reel_entry(video_id: &str, endpoint: &Value) -> ShortItem {
         .or_else(|| endpoint["navigationEndpoint"]["browseEndpoint"]["browseId"].as_str())
         .map(ToOwned::to_owned);
 
-    let channel_avatar_url = last_thumbnail_url(&header["channelThumbnail"]["thumbnails"])
-        .or_else(|| last_thumbnail_url(&metadata["channelThumbnail"]["thumbnails"]))
+    let channel_avatar_url = largest_url(&header["channelThumbnail"]["thumbnails"])
+        .or_else(|| largest_url(&metadata["channelThumbnail"]["thumbnails"]))
         .map(|url| normalize_youtube_image_url(&url));
 
     let view_count_text =
@@ -156,7 +290,30 @@ fn parse_reel_entry(video_id: &str, endpoint: &Value) -> ShortItem {
         comment_count_text,
         published_text: reel_text(&header["timestampText"]),
         sequence_params: endpoint["sequenceParams"].as_str().map(ToOwned::to_owned),
+        linked_video_id: None,
+        linked_video_title: None,
     }
+}
+
+/// The full video a reel links to, with its title. The same carousel also holds the sound pivot and
+/// links to other reels, which open through a `reelWatchEndpoint` instead of a `watchEndpoint`.
+fn linked_video(metadata: &[Value]) -> Option<(String, Option<String>)> {
+    metadata
+        .iter()
+        .find_map(|entry| entry["reelCarouselViewModel"]["buttonViewModels"].as_array())?
+        .iter()
+        .find_map(|entry| {
+            let button =
+                &entry["reelCarouselButtonViewModel"]["buttonViewModel"]["buttonViewModel"];
+            let id = button["onTap"]["innertubeCommand"]["watchEndpoint"]["videoId"].as_str()?;
+            let title = button["titleFormatted"]["content"]
+                .as_str()
+                .or_else(|| button["accessibilityText"].as_str())
+                .map(str::trim)
+                .filter(|title| !title.is_empty())
+                .map(ToOwned::to_owned);
+            Some((id.to_string(), title))
+        })
 }
 
 /// Resolve the pagination token, preferring the explicit continuation fields and
@@ -202,14 +359,6 @@ fn reel_accessibility_count(label: &Value) -> Option<String> {
         n if n >= 1_000 => format!("{:.1}K", n as f64 / 1_000.0),
         n => n.to_string(),
     })
-}
-
-fn last_thumbnail_url(thumbnails: &Value) -> Option<String> {
-    thumbnails
-        .as_array()
-        .and_then(|arr| arr.last())
-        .and_then(|thumb| thumb["url"].as_str())
-        .map(ToOwned::to_owned)
 }
 
 #[cfg(test)]
@@ -263,5 +412,78 @@ mod tests {
         assert_eq!(short.channel_id.as_deref(), Some("UC123"));
         assert_eq!(short.view_count_text.as_deref(), Some("1.2M views"));
         assert_eq!(feed.continuation.as_deref(), Some("SEQ1"));
+    }
+
+    #[test]
+    fn ios_ads_are_named_by_their_video_type() {
+        let res = json!({ "entries": [
+            { "command": { "reelWatchEndpoint": { "videoId": "ad000000001", "videoType": "REEL_VIDEO_TYPE_AD" } } },
+            { "command": { "reelWatchEndpoint": { "videoId": "vid00000002", "videoType": "REEL_VIDEO_TYPE_VIDEO" } } }
+        ], "continuation": "NEXT" });
+        let feed = parse_reel_sequence(&res);
+        assert_eq!(feed.items.len(), 1);
+        assert_eq!(feed.items[0].id, "vid00000002");
+        assert_eq!(feed.continuation.as_deref(), Some("NEXT"));
+    }
+
+    #[test]
+    fn the_item_watch_overlay_reads_the_linked_video_and_skips_other_reels() {
+        let mut item = parse_reel_entry("vid00000004", &Value::Null);
+        let button = |command: Value, title: &str| {
+            json!({ "reelCarouselButtonViewModel": { "buttonViewModel": { "buttonViewModel": {
+                "onTap": { "innertubeCommand": command },
+                "titleFormatted": { "content": title }
+            } } } })
+        };
+        let answer = json!({ "overlay": { "reelPlayerOverlayRenderer": { "playerOverlay": {
+            "reelPlayerOverlayViewModel": { "metapanel": { "reelMetapanelViewModel": { "metadataItems": [
+                { "reelCarouselViewModel": { "buttonViewModels": [
+                    button(json!({ "reelWatchEndpoint": { "videoId": "otherreel00" } }), "Another short"),
+                    button(json!({ "watchEndpoint": { "videoId": "fullvideo00" } }), " The full video "),
+                ] } }
+            ] } } }
+        } } } });
+        apply_reel_overlay(&mut item, &answer);
+        assert_eq!(item.linked_video_id.as_deref(), Some("fullvideo00"));
+        assert_eq!(item.linked_video_title.as_deref(), Some("The full video"));
+
+        let mut none = parse_reel_entry("vid00000005", &Value::Null);
+        apply_reel_overlay(&mut none, &json!({}));
+        assert_eq!(none.linked_video_id, None);
+    }
+
+    #[test]
+    fn the_item_watch_overlay_fills_title_channel_and_counts() {
+        let mut item = parse_reel_entry("vid00000003", &Value::Null);
+        assert_eq!(item.title, "Short");
+        let answer = json!({ "overlay": { "reelPlayerOverlayRenderer": {
+            "reelPlayerHeaderSupportedRenderers": { "reelPlayerHeaderRenderer": {
+                "timestampText": { "simpleText": "2 days ago" }
+            } },
+            "playerOverlay": { "reelPlayerOverlayViewModel": {
+                "metapanel": { "reelMetapanelViewModel": { "metadataItems": [
+                    { "reelChannelBarViewModel": {
+                        "channelName": { "content": "@creator", "commandRuns": [{ "onTap": { "innertubeCommand": {
+                            "browseEndpoint": { "browseId": "UCcreator" } } } }] },
+                        "decoratedAvatarViewModel": { "decoratedAvatarViewModel": { "avatar": { "avatarViewModel": {
+                            "image": { "sources": [{ "url": "https://yt3.ggpht.com/a=s48-c-k-c0x00ffffff-no-rj" }] } } } } }
+                    } },
+                    { "shortsVideoTitleViewModel": { "text": { "content": "A real title " } } }
+                ] } },
+                "actionBar": { "reelActionBarViewModel": { "buttonViewModels": [
+                    { "likeButtonViewModel": { "toggleButtonViewModel": { "toggleButtonViewModel": {
+                        "defaultButtonViewModel": { "buttonViewModel": { "title": "58K" } } } } } },
+                    { "buttonViewModel": { "iconName": "SHORTS_COMMENT", "title": "662" } }
+                ] } }
+            } }
+        } } });
+        apply_reel_overlay(&mut item, &answer);
+        assert_eq!(item.title, "A real title");
+        assert_eq!(item.channel_id.as_deref(), Some("UCcreator"));
+        assert_eq!(item.channel_name, "@creator");
+        assert!(item.channel_avatar_url.is_some());
+        assert_eq!(item.like_count_text.as_deref(), Some("58K"));
+        assert_eq!(item.comment_count_text.as_deref(), Some("662"));
+        assert_eq!(item.published_text.as_deref(), Some("2 days ago"));
     }
 }

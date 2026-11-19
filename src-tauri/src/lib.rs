@@ -2,9 +2,12 @@
 #![warn(clippy::pedantic)]
 #![allow(clippy::missing_errors_doc)]
 
+mod ai_list;
 pub mod api;
 mod appimage;
+pub mod backup;
 mod bridge;
+mod cache_usage;
 #[cfg(target_os = "linux")]
 mod codec_probe;
 pub mod commands;
@@ -13,15 +16,26 @@ mod db;
 mod errors;
 pub mod flow_neuro;
 #[cfg(any(target_os = "linux", test))]
+mod legacy_link_handler;
+#[cfg(any(target_os = "linux", test))]
 mod linux_startup;
+mod linux_system;
+mod local_media;
+#[cfg(target_os = "macos")]
+mod macos_dock;
 #[cfg(target_os = "macos")]
 mod macos_window;
 pub mod models;
 mod music_brain;
+pub mod profiles;
+mod recap;
+mod relaunch;
+mod scrobble;
 mod security;
 mod services;
 mod streaming;
 pub mod sync;
+pub mod sync2;
 mod update_support;
 #[cfg(any(target_os = "linux", test))]
 mod web_process;
@@ -32,75 +46,139 @@ use std::sync::Arc;
 use tauri::Manager;
 
 use api::innertube::InnertubeClient;
-use commands::backup::{export_backup_data, import_backup_data};
+use commands::ai_list::{
+    ai_list_check_report, ai_list_learn_handles, ai_list_match_channels, ai_list_matcher_data,
+    ai_list_refresh, ai_list_source_settings, ai_list_status, ai_list_submit_report,
+};
+use commands::app_window::{AppWindowSession, AppWindowState, app_window_session, open_app_window};
+use commands::backup::{
+    export_backup_data, import_backup_data, import_profile_backup, profiles_restore_master,
+};
 use commands::db::{
-    add_watch_record, add_watch_records_bulk, clear_watch_history, delete_watch_record,
-    get_music_history, get_setting, get_watch_history, set_setting,
+    add_watch_record, add_watch_records_bulk, clear_watch_history, delete_short_watch_records,
+    delete_watch_record, get_music_history, get_setting, get_watch_history,
+    get_watch_history_years, get_watch_progress, get_watch_records, reset_app_data,
+    restore_watch_record, set_setting, watch_history_settled,
 };
 use commands::diagnostics::{
-    clear_logs, get_graphics_mode, log_frontend_event, logs_dir_path, read_logs,
-    reveal_logs_folder, set_graphics_mode, startup_render_ok, updates_supported,
+    clear_logs, crash_report_delete, crash_report_dismiss, crash_report_read, get_graphics_mode,
+    graphics_report, graphics_trial_shown, keep_graphics_trial, linux_codec_source,
+    log_frontend_event, logs_dir_path, read_logs, reset_visitor_identity, reveal_logs_folder,
+    revert_graphics_trial, set_graphics_mode, start_graphics_trial, startup_render_ok,
+    updates_supported,
 };
 use commands::discord::{clear_discord_presence, set_discord_presence};
 use commands::downloads::{
     DownloadManager, cancel_download, clear_downloads, create_download_collection,
-    delete_download_collections, delete_downloads, get_download_formats, get_downloaded_video_ids,
-    get_offline_stream, list_download_collections, list_downloads, pause_download, resume_download,
-    start_download,
+    delete_download_collections, delete_downloads, discard_download, find_earlier_downloads,
+    get_download_formats, get_download_logs, get_downloaded_video_ids, get_offline_stream,
+    list_download_collections, list_downloads, pause_download, restore_downloads, resume_download,
+    retag_older_downloads, retry_download, reveal_download, set_download_concurrency,
+    show_download_notification, start_download,
 };
-use commands::files::write_backup_file;
+use commands::external::open_external;
+use commands::files::{save_recap_poster, write_backup_file, write_lyrics_file};
+use commands::linked::{
+    linked_accept_join, linked_add_device, linked_added_by, linked_answer,
+    linked_answer_recovery_notice, linked_ask_to_join, linked_cancel, linked_cancel_login_change,
+    linked_catch_up, linked_choose_profile, linked_contest, linked_create, linked_create_lan,
+    linked_create_webdav, linked_dashboard, linked_decline_join, linked_delete_profile,
+    linked_devices, linked_enter_code, linked_finish_login_change, linked_forget,
+    linked_join_requests, linked_keep_side, linked_leave, linked_left_out, linked_link_phase,
+    linked_preview_restore, linked_profiles, linked_recovery_saved, linked_remove, linked_rename,
+    linked_replace_recovery, linked_restore, linked_retry_keychain, linked_set_left_out,
+    linked_show_code, linked_start_login_change, linked_status, linked_stop_profile,
+    linked_sync_added_profile, linked_sync_now, linked_sync_profile, linked_update_login,
+};
+use commands::live::{live_consents, live_now, live_send, live_set_consent, live_status};
+use commands::lyrics::{
+    clear_lyrics_cache, evict_cached_lyrics, get_cached_lyrics, lyrics_cache_size,
+    put_cached_lyrics, save_download_lyrics,
+};
+use commands::media_keys::{
+    global_media_keys_set, global_media_keys_supported, system_output_watch,
+};
 use commands::music::{
     get_cached_music_home_page, get_music_album_continuation, get_music_album_page,
-    get_music_artist_items, get_music_artist_page, get_music_charts_page, get_music_deep_cuts,
-    get_music_explore_page, get_music_home_page, get_music_linked_artists, get_music_lyrics_typed,
-    get_music_mood_genre, get_music_mood_groups, get_music_moods, get_music_new_releases,
-    get_music_playlist_continuation, get_music_playlist_page, get_music_queue,
-    get_music_queue_continuation, get_music_related_typed, get_music_request_diagnostics,
-    get_music_search_suggestions, get_music_search_summary, get_music_stream,
-    get_music_trending_songs, get_music_watch_queue, image_proxy_base, lyrics_http_get,
-    proxy_image_url, search_music_continuation, search_music_typed,
+    get_music_artist_items, get_music_artist_page, get_music_captions_lrc, get_music_charts_page,
+    get_music_deep_cuts, get_music_explore_page, get_music_home_page, get_music_linked_artists,
+    get_music_lyrics_typed, get_music_mood_genre, get_music_mood_groups, get_music_moods,
+    get_music_new_releases, get_music_playlist_continuation, get_music_playlist_page,
+    get_music_queue, get_music_queue_continuation, get_music_related_typed,
+    get_music_request_diagnostics, get_music_search_suggestions, get_music_search_summary,
+    get_music_stream, get_music_trending_songs, get_music_watch_queue, image_proxy_base,
+    lyrics_http_get, proxy_artwork_loop, proxy_image_url, romanize_lyrics,
+    search_music_continuation, search_music_typed,
 };
 use commands::music_brain::{
-    block_music_artist, dislike_music_artist, get_blocked_music_artists, get_daily_mixes,
-    get_heavy_rotation, get_music_brain_snapshot, get_music_rediscover, get_music_taste_profile,
-    get_music_time_rotation, rank_music_candidates, record_music_interaction, reset_music_brain,
-    unblock_music_artist,
+    block_music_artist, dislike_music_artist, favourite_music_artist, get_blocked_music_artists,
+    get_daily_mixes, get_heavy_rotation, get_music_artist_insights, get_music_brain_snapshot,
+    get_music_rediscover, get_music_taste_profile, get_music_time_rotation, rank_music_candidates,
+    record_music_interaction, reset_music_brain, set_favourite_music_artist, unblock_music_artist,
+};
+use commands::music_queue::{
+    clear_music_queue_state, get_music_resume_position, load_music_queue_state,
+    save_music_queue_state, save_music_resume_position,
+};
+use commands::notes::{
+    delete_notes, list_notes, restore_notes, save_note, save_note_subject, save_notes_order,
 };
 use commands::notifications::{
-    check_subscriptions_now, clear_notifications, delete_notification, get_notifications,
-    get_unread_notification_count, mark_notifications_read,
+    cancel_upcoming_reminder, check_subscriptions_now, clear_notifications, delete_notification,
+    get_notifications, get_unread_notification_count, get_upcoming_reminders,
+    mark_notifications_read, restore_notification, set_upcoming_reminder,
 };
 #[cfg(not(target_os = "macos"))]
 use commands::pip::PIP_WINDOW_LABEL;
 use commands::pip::{
-    PipState, close_pip_window, focus_main_window, open_pip_window, pip_session, pip_window_ready,
-    set_pip_always_on_top,
+    PipState, close_pip_window, focus_main_window, focus_pip_source_window, open_pip_window,
+    pip_session, pip_window_ready, set_pip_always_on_top,
+};
+use commands::process::relaunch_app;
+use commands::profiles::{
+    profiles_cancel_switch, profiles_create, profiles_delete, profiles_hold_link, profiles_list,
+    profiles_prepare_switch, profiles_rename, profiles_set_ask_whos_watching, profiles_set_look,
+    profiles_set_photo, profiles_switch, profiles_take_held_link, profiles_take_launch_question,
 };
 use commands::recommendation::{
     add_blocked_topic, add_preferred_topic, block_channel, bootstrap_from_history,
     bootstrap_from_subscriptions, clear_channel_memory, complete_onboarding, end_watch_session,
-    forget_remembered_channel, get_brain_snapshot, get_flow_persona, get_onboarding_status,
-    get_recommendation_events, get_taste_overview, import_brain, learn_from_search,
-    log_interaction, mark_not_interested, note_subscription, observe_channel_uploads,
-    record_feed_impressions, remove_preferred_topic, report_watch_progress, reset_brain,
-    resolve_hidden_channel_names, unblock_channel, unblock_topic,
+    forget_remembered_channel, get_brain_snapshot, get_flow_persona, get_neighbour_channels,
+    get_onboarding_status, get_profile_interests, get_recommendation_events, get_taste_overview,
+    import_brain, learn_from_search, log_interaction, mark_not_interested, note_subscription,
+    observe_channel_uploads, record_feed_impressions, record_seen_videos, remove_preferred_topic,
+    report_watch_progress, reset_brain, resolve_hidden_channel_names, seen_video_ids_among,
+    unblock_channel, unblock_topic,
+};
+use commands::scrobble::{
+    scrobble_flush, scrobble_listened, scrobble_love, scrobble_now_playing,
+    scrobble_retry_keychain, scrobble_set_own_key, scrobble_sign_in, scrobble_sign_out,
+    scrobble_similar_tracks, scrobble_status, scrobble_top_artists,
 };
 use commands::shorts::{
     get_shorts_feed, load_more_shorts, record_seen_shorts, report_short_view, reset_shorts_feed,
 };
+use commands::subscription_posts::{forget_subscription_posts, get_subscription_posts};
+use commands::subtitle_file::read_subtitle_file;
 use commands::sync::{
-    sync_cancel, sync_device_info, sync_host_receive, sync_respond_consent, sync_scan_join,
-    sync_start_host, sync_status,
+    sync_cancel, sync_device_info, sync_firewall_help, sync_host_receive, sync_respond_consent,
+    sync_scan_join, sync_start_host, sync_status,
+};
+use commands::tray::{
+    music_tray_hide, music_tray_supported, music_tray_update, set_download_progress,
+    set_shell_pages, take_launch_link, take_launch_page,
 };
 use commands::window::{PlayerFullscreenState, set_player_fullscreen};
 use commands::youtube::{
-    fetch_subtitles, get_channel_details, get_channel_tab, get_comments, get_dearrow_override,
-    get_live_chat, get_music_album, get_music_artist, get_music_charts, get_music_explore,
-    get_music_home, get_music_lyrics, get_music_related, get_playlist_details, get_post_comments,
-    get_related_videos, get_return_youtube_dislike, get_sabr_debug_state, get_search_suggestions,
-    get_sponsorblock_segments, get_stream_info, get_subscription_rotation_feed,
-    get_subscription_rss_feed, get_trending_videos, get_video_details, parse_subscription_export,
-    refresh_music_home, resolve_channel_id, search_music, search_videos,
+    fetch_subtitles, get_channel_about, get_channel_details, get_channel_page, get_channel_tab,
+    get_comments, get_dearrow_override, get_explore_destination, get_explore_grid,
+    get_explore_page, get_live_chat, get_mix_playlist, get_more_related_videos,
+    get_non_music_segments, get_original_title, get_paid_promotion, get_playlist_details,
+    get_post_comments, get_related_videos, get_return_youtube_dislike, get_sabr_debug_state,
+    get_search_suggestions, get_sponsorblock_segments, get_stream_info,
+    get_subscription_rotation_feed, get_subscription_rss_feed, get_unplayable_video_ids,
+    get_video_category, get_video_details, get_video_metadata, get_video_storyboard,
+    parse_subscription_export, resolve_channel_id, scan_subscription_collaborations, search_videos,
     stream_subscription_rss_feed, submit_sponsorblock_segment,
 };
 use services::discord_presence::DiscordPresence;
@@ -115,17 +193,31 @@ use services::youtube_service::YoutubeService;
 /// outputs share one `EnvFilter` (default `info`, override with `RUST_LOG`) and
 /// carry module target + line number so every event points at its source.
 ///
-/// Returns the appender's flush guard, which the caller must keep alive for the
-/// process lifetime, or `None` when only stdout logging could be initialized.
-/// The file mirrors the same events as stdout — it never logs secrets.
+/// A release build writes stdout through a worker thread. Written directly, a
+/// launcher that hands Flow a pipe and never reads it fills the pipe after hours
+/// of logging, and then every thread that logs blocks on it, the UI thread
+/// included. The worker drops lines instead. A debug build writes directly, so
+/// the last lines before a crash still reach the terminal.
+///
+/// Returns the writers' flush guards, which the caller must keep alive for the
+/// process lifetime. The file mirrors the same events as stdout — it never logs
+/// secrets.
 fn init_tracing(
     app_data_dir: &std::path::Path,
-) -> Option<tracing_appender::non_blocking::WorkerGuard> {
+) -> Vec<tracing_appender::non_blocking::WorkerGuard> {
     use tracing_subscriber::{EnvFilter, Layer, fmt, prelude::*};
 
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let mut guards = Vec::new();
 
     let stdout_layer = fmt::layer().with_target(true).with_line_number(true);
+    let stdout_layer = if cfg!(debug_assertions) {
+        stdout_layer.boxed()
+    } else {
+        let (writer, guard) = tracing_appender::non_blocking(std::io::stdout());
+        guards.push(guard);
+        stdout_layer.with_writer(writer).boxed()
+    };
 
     let log_dir = app_data_dir.join("logs");
     let appender = std::fs::create_dir_all(&log_dir)
@@ -140,33 +232,36 @@ fn init_tracing(
                 .map_err(|e| e.to_string())
         });
 
-    let (file_layer, guard) = match appender {
+    let file_layer = match appender {
         Ok(appender) => {
             let (writer, guard) = tracing_appender::non_blocking(appender);
-            let layer = fmt::layer()
-                .with_ansi(false)
-                .with_target(true)
-                .with_line_number(true)
-                .with_writer(writer)
-                .boxed();
-            (Some(layer), Some(guard))
+            guards.push(guard);
+            Some(
+                fmt::layer()
+                    .with_ansi(false)
+                    .with_target(true)
+                    .with_line_number(true)
+                    .with_writer(writer)
+                    .boxed(),
+            )
         }
         Err(error) => {
             eprintln!("flow: file logging unavailable, using stdout only: {error}");
-            (None, None)
+            None
         }
     };
 
+    let file_layer_ready = file_layer.is_some();
     tracing_subscriber::registry()
         .with(filter)
         .with(stdout_layer)
         .with(file_layer)
         .init();
 
-    if guard.is_some() {
+    if file_layer_ready {
         tracing::info!(dir = %log_dir.display(), "file_logging_initialized");
     }
-    guard
+    guards
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -175,6 +270,34 @@ pub fn run() {
     // key their crash sentinel to the real bundle identifier. Must run before any
     // GTK/WebKitGTK init (which happens in `.build()` below).
     let context = tauri::generate_context!();
+    relaunch::capture_launch_env();
+    let crash_folder = profiles::app_data_dir(context.config().identifier.as_str())
+        .map(|dir| services::crash_report::folder(&dir));
+    if let Some(folder) = &crash_folder {
+        services::crash_report::install_hook(
+            folder.clone(),
+            context.package_info().version.to_string(),
+        );
+    }
+
+    // The profile must be known before the builder registers anything that opens a store.
+    let (active_profile, profile_warning) =
+        match profiles::app_data_dir(context.config().identifier.as_str()) {
+            Some(dir) => profiles::load_for_process(&dir),
+            None => (
+                profiles::ActiveProfile::fallback_default(),
+                Some("no app data folder for the profile registry".to_string()),
+            ),
+        };
+
+    // Before any window opens, since the web view holds its cache while it runs.
+    if let Some(dir) = profiles::app_data_dir(context.config().identifier.as_str()) {
+        let cache_dirs = cache_usage::artwork_cache_dirs(
+            context.config().identifier.as_str(),
+            context.config().product_name.as_deref().unwrap_or_default(),
+        );
+        cache_usage::tidy_artwork_at_launch(&dir, &cache_dirs);
+    }
 
     #[cfg(target_os = "linux")]
     let boot_report = linux_startup::begin(
@@ -197,7 +320,34 @@ pub fn run() {
     // spawning a duplicate; we just raise the window here.
     #[cfg(desktop)]
     {
-        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            // The desktop file's "New window" action launches Flow again with this flag.
+            if argv.iter().any(|arg| arg == "--new-window") {
+                let handle = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    let opener = handle.get_window("main");
+                    let session = AppWindowSession {
+                        route: "/".into(),
+                        handoff: None,
+                    };
+                    if let Err(error) = commands::app_window::open_app_window_with(
+                        &handle,
+                        opener.as_ref(),
+                        session,
+                    ) {
+                        tracing::warn!(error = ?error, "Could not open a window for --new-window");
+                    }
+                });
+                return;
+            }
+            if let Some(route) = services::shell_pages::route_from_args(argv.iter()) {
+                services::shell_pages::open_route(app, route);
+                return;
+            }
+            if let Some(handoff) = services::shell_pages::link_from_args(argv.iter()) {
+                services::shell_pages::open_link(app, &handoff);
+                return;
+            }
             if let Some(window) = app.get_window("main") {
                 let _ = window.unminimize();
                 let _ = window.show();
@@ -211,9 +361,11 @@ pub fn run() {
         let window_state_flags = tauri_plugin_window_state::StateFlags::SIZE
             | tauri_plugin_window_state::StateFlags::POSITION
             | tauri_plugin_window_state::StateFlags::MAXIMIZED;
+        // Only the main window's place is remembered; extra windows cascade from their opener.
         builder = builder.plugin(
             tauri_plugin_window_state::Builder::default()
                 .with_state_flags(window_state_flags)
+                .with_filter(|label| label == "main")
                 .build(),
         );
 
@@ -227,6 +379,7 @@ pub fn run() {
     }
 
     builder
+        .plugin(profiles::webview_plugin(&active_profile))
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_os::init())
@@ -243,11 +396,39 @@ pub fn run() {
                 ))
             })?;
 
-            // Keep the file-appender flush guard alive for the app's lifetime by
-            // handing it to Tauri's managed state (dropped on exit, flushing).
-            if let Some(guard) = init_tracing(&app_data_dir) {
-                app.manage(std::sync::Mutex::new(guard));
+            // Keep the log writers' flush guards alive for the app's lifetime by
+            // handing them to Tauri's managed state (dropped on exit, flushing).
+            app.manage(std::sync::Mutex::new(init_tracing(&app_data_dir)));
+
+            tracing::info!(
+                profile = %active_profile.id,
+                default = active_profile.is_default,
+                after_switch = active_profile.after_switch,
+                "profile"
+            );
+            if let Some(warning) = &profile_warning {
+                tracing::warn!("{warning}");
             }
+            if profiles::app_data_dir(&app.config().identifier).as_ref() != Some(&app_data_dir) {
+                tracing::warn!(
+                    "profile registry folder differs from the app data folder {}",
+                    app_data_dir.display()
+                );
+            }
+            app.manage(services::crash_report::CrashReports::new(
+                crash_folder
+                    .clone()
+                    .unwrap_or_else(|| services::crash_report::folder(&app_data_dir)),
+            ));
+            app.manage(active_profile.clone());
+            app.manage(services::profile_service::ProfileService::new(
+                app_data_dir.clone(),
+                active_profile.clone(),
+            ));
+            let retry_dir = app_data_dir.clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                services::profile_service::retry_keychain_deletes(&retry_dir);
+            });
 
             // Report which Linux GPU/Wayland workaround tier this launch applied,
             // so it appears in bug reports. `prior_failed_boots > 0` means the
@@ -259,6 +440,10 @@ pub fn run() {
                 nvidia_preset = boot_report.nvidia_preset,
                 safe_graphics = boot_report.safe_graphics,
                 graphics_mode = boot_report.mode.as_str(),
+                reason = boot_report.reason.as_str(),
+                render_path = boot_report.render_path.as_str(),
+                faster = boot_report.faster.as_str(),
+                own_variables = boot_report.own_variables,
                 libva_fallback,
                 "linux_startup_workarounds_applied"
             );
@@ -270,7 +455,7 @@ pub fn run() {
 
             // Let the BotGuard minter open a hidden WebView for a real-browser
             // poToken (falls back to the headless Node sidecar without this).
-            api::innertube::core::webview_pot::set_app_handle(app.handle().clone());
+            api::innertube::core::hidden_webview::set_app_handle(app.handle().clone());
 
             // Linux bundles keep the Node sidecar scripts in the resource dir.
             if let Ok(dir) = app.path().resource_dir() {
@@ -282,13 +467,23 @@ pub fn run() {
             #[cfg(windows)]
             services::win_notify::ensure_setup(app.handle());
 
+            // Name Flow's audio in the volume mixer instead of "Microsoft Edge WebView2".
+            #[cfg(windows)]
+            services::win_mixer::start(app.handle());
+
             api::http::warm_shared_client();
 
             // Initialize native Innertube extractor (shared by the video path and
             // the additive YouTube Music subsystem).
-            let extractor = Arc::new(InnertubeClient::new(app.handle()));
+            let extractor = Arc::new(InnertubeClient::new());
+            // Each profile has its own YouTube visitor identity; a new one is fetched on first open.
+            let profile_root = active_profile.root(&app_data_dir);
+            std::fs::create_dir_all(&profile_root)?;
+            extractor.keep_identity_in(profile_root.join("visitor_identity.json"));
             let youtube_service = YoutubeService::new(extractor.clone());
+            let link_resolver = commands::youtube::link_resolver(youtube_service.clone());
             app.manage(youtube_service);
+            app.manage(extractor.clone());
 
             // The first video otherwise waits on both: the visitor identity every
             // player request carries, and the player script web clients need.
@@ -299,18 +494,31 @@ pub fn run() {
             });
 
             // Initialize SQLite database
-            let pool = tauri::async_runtime::block_on(async {
-                db::initialize_database(app_data_dir).await
-            })
-            .map_err(|error| {
-                Box::new(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    error.to_string(),
-                ))
-            })?;
+            let pool = tauri::async_runtime::block_on(profiles::open_database(
+                &app_data_dir,
+                &active_profile,
+            ))
+            .map_err(|error| Box::new(std::io::Error::new(std::io::ErrorKind::Other, error)))?;
+
+            for key in commands::db::BACKEND_SETTINGS {
+                let value = tauri::async_runtime::block_on(db::settings::get_setting(&pool, key))
+                    .ok()
+                    .flatten();
+                commands::db::apply_backend_setting(key, value.as_deref());
+            }
 
             // Manage database pool
             app.manage(pool.clone());
+            app.manage(ai_list::AiListService::new(&app_data_dir));
+            let scrobbler = Arc::new(scrobble::scrobbler::Scrobbler::new(
+                pool.clone(),
+                Arc::new(scrobble::credentials::ProfileScoped::new(
+                    scrobble::credentials::keychain(),
+                    &active_profile,
+                )),
+            ));
+            scrobble::worker::spawn(Arc::clone(&scrobbler));
+            app.manage(scrobbler);
             app.manage(MusicService::new(extractor, pool.clone()));
 
             let music_pool = pool.clone();
@@ -368,19 +576,52 @@ pub fn run() {
             })?;
             app.manage(music_brain_store);
 
-            app.manage(Arc::new(sync::session::SyncManager::new()));
+            app.manage(Arc::new(sync::session::SyncManager::new(
+                sync::session::SyncProfile {
+                    syncs_here: active_profile.is_default,
+                    default_name: active_profile.default_name.clone(),
+                },
+            )));
+            app.manage(sync2::service::BackgroundSync::default());
+            app.manage(sync2::link_task::LinkTask::default());
+            app.manage(sync2::lan_peers::LanPeers::default());
+            app.manage(sync2::live_hub::LiveHub::default());
+            app.manage(sync2::push::LocalPushes::default());
+            sync2::service::spawn(app.handle().clone());
+            sync2::push::spawn(app.handle().clone());
+            sync2::lan_runtime::spawn(app.handle().clone());
+            sync2::live::spawn(app.handle().clone());
 
             // Manage the Shorts feed service (prefetch buffer + session de-dup)
             app.manage(ShortsService::new());
             app.manage(services::blocked_channel_names::BlockedChannelNames::default());
             app.manage(services::home_feed::HomeFeedService::new());
             app.manage(DownloadManager::default());
+            app.manage(commands::local_media::LocalCoverLimit::default());
+            let local_media_scanner = Arc::new(local_media::scanner::LocalMediaScanner::default());
+            app.manage(Arc::clone(&local_media_scanner));
+            local_media::scanner::scan_at_launch(
+                local_media_scanner,
+                app.handle().clone(),
+                db::device::pool(&pool).clone(),
+            );
             app.manage(PlayerFullscreenState::default());
             app.manage(PipState::default());
+            app.manage(AppWindowState::default());
+            app.manage(commands::theme::ThemeFileWatch::default());
             app.manage(DiscordPresence::new());
+            app.manage(commands::discord::DiscordPresenceOwner::default());
+            app.manage(services::music_tray::MusicTray::default());
+            app.manage(services::media_keys::PlaybackTarget::default());
+            app.manage(services::system_output::SystemOutputWatch::default());
+            app.manage(services::shell_pages::LaunchRequest::from_args(
+                services::shell_pages::lossy_args(std::env::args_os()).iter(),
+            ));
+            services::media_keys::watch_playback_claims(app.handle());
 
             // Initialize and manage streaming proxy
             let (streaming_manager, proxy_listeners) = streaming::proxy::StreamingManager::new();
+            streaming_manager.set_link_resolver(link_resolver);
             tauri::async_runtime::spawn(streaming::proxy::start_proxy_server(
                 streaming_manager.clone(),
                 proxy_listeners.media,
@@ -389,19 +630,31 @@ pub fn run() {
                 streaming_manager.clone(),
                 proxy_listeners.images,
             ));
+            tauri::async_runtime::spawn(streaming::proxy::keep_tidy(streaming_manager.clone()));
             app.manage(streaming_manager);
             app.manage(update_support);
 
             services::notification_service::spawn_poll_loop(app.handle().clone(), pool.clone());
+            ai_list::service::spawn(app.handle().clone(), pool.clone());
+            app.manage(backup::auto::AutoBackupState::default());
+            backup::auto::spawn(app.handle().clone(), pool.clone());
+            commands::cache::spawn_startup_trim(app.handle().clone(), pool.clone());
 
-            // Register the flow:// scheme at runtime. Production installers
-            // (NSIS/MSI, .desktop) do this, but dev builds and Linux need it.
+            // Register the flow:// scheme at runtime. Installers and Linux packages
+            // do this themselves; an AppImage and dev builds need it here.
             #[cfg(any(target_os = "linux", all(debug_assertions, windows)))]
-            if !update_support.package_owns_desktop_entry() {
+            let registers_links = update_support
+                .registers_link_handler(tauri::utils::platform::bundle_type().as_ref());
+            #[cfg(any(target_os = "linux", all(debug_assertions, windows)))]
+            if registers_links {
                 use tauri_plugin_deep_link::DeepLinkExt;
                 if let Err(error) = app.deep_link().register_all() {
                     tracing::warn!("failed to register flow:// scheme: {error}");
                 }
+            }
+            #[cfg(target_os = "linux")]
+            if !registers_links {
+                legacy_link_handler::remove_stale(app.handle());
             }
 
             // Raise the window when a flow:// URL arrives while running; the
@@ -421,19 +674,28 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             if let Some(main_window) = app.get_webview_window("main") {
                 macos_window::install_close_handler(&main_window);
+                macos_window::allow_full_frame_rate(&main_window);
             }
 
             #[cfg(target_os = "linux")]
             if let Some(main_window) = app.get_webview_window("main") {
                 web_process::watch(&main_window);
             }
+            #[cfg(target_os = "linux")]
+            linux_startup::watch_trial(app.handle().clone());
 
-            // Other platforms quit with the main window, including the pop-out.
+            // Other platforms quit with the main window, including the pop-out,
+            // unless another Flow window is still open: then it only hides.
             #[cfg(not(target_os = "macos"))]
-            if let Some(main_window) = app.get_webview_window("main") {
+            if let Some(main_window) = app.get_window("main") {
                 let handle = app.handle().clone();
+                let main = main_window.clone();
                 main_window.on_window_event(move |event| {
-                    if matches!(event, tauri::WindowEvent::CloseRequested { .. }) {
+                    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                        if commands::app_window::hide_main_instead_of_closing(&main) {
+                            api.prevent_close();
+                            return;
+                        }
                         if let Some(pip) = handle.get_webview_window(PIP_WINDOW_LABEL) {
                             let _ = pip.destroy();
                         }
@@ -447,42 +709,119 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            // --- Web browser tabs ---
+            commands::browser::browser_show,
+            commands::browser::browser_navigate,
+            commands::browser::browser_set_bounds,
+            commands::browser::browser_hide,
+            commands::browser::browser_close,
+            commands::browser::browser_retain,
+            commands::browser::browser_reload,
+            commands::browser::browser_stop,
             search_videos,
             get_video_details,
             get_related_videos,
+            get_more_related_videos,
+            get_video_category,
+            get_paid_promotion,
+            get_video_metadata,
+            get_video_storyboard,
             get_stream_info,
+            get_unplayable_video_ids,
             get_channel_details,
+            get_channel_page,
+            get_channel_about,
             get_channel_tab,
             get_playlist_details,
+            get_mix_playlist,
             get_comments,
             get_post_comments,
             get_live_chat,
-            get_trending_videos,
+            get_explore_destination,
+            get_explore_page,
+            get_explore_grid,
             get_search_suggestions,
-            search_music,
             parse_subscription_export,
-            get_music_lyrics,
-            get_music_related,
-            get_music_album,
             get_watch_history,
             get_music_history,
             add_watch_record,
             add_watch_records_bulk,
+            watch_history_settled,
+            restore_watch_record,
             delete_watch_record,
+            delete_short_watch_records,
+            get_watch_records,
+            get_watch_progress,
+            get_watch_history_years,
             clear_watch_history,
+            reset_app_data,
             get_setting,
             set_setting,
+            profiles_list,
+            profiles_create,
+            profiles_rename,
+            profiles_set_look,
+            profiles_set_photo,
+            profiles_delete,
+            profiles_prepare_switch,
+            profiles_cancel_switch,
+            profiles_switch,
+            profiles_hold_link,
+            profiles_take_held_link,
+            profiles_take_launch_question,
+            profiles_set_ask_whos_watching,
+            relaunch_app,
             write_backup_file,
+            save_recap_poster,
+            write_lyrics_file,
+            get_cached_lyrics,
+            put_cached_lyrics,
+            evict_cached_lyrics,
+            lyrics_cache_size,
+            clear_lyrics_cache,
+            save_download_lyrics,
             export_backup_data,
+            commands::cache::cache_usage,
+            commands::cache::clear_cache,
+            commands::cache::set_cache_limit,
+            commands::backup_files::export_backup_file,
+            commands::backup_files::read_backup,
+            commands::backup_files::import_other_app,
+            commands::backup_files::auto_backup_register,
+            commands::backup_files::auto_backup_status,
+            commands::backup_files::auto_backup_run_now,
+            import_profile_backup,
+            profiles_restore_master,
             import_backup_data,
             get_download_formats,
             start_download,
             cancel_download,
             pause_download,
             resume_download,
+            retry_download,
+            discard_download,
+            restore_downloads,
+            get_download_logs,
+            set_download_concurrency,
+            reveal_download,
+            show_download_notification,
             list_downloads,
+            find_earlier_downloads,
+            retag_older_downloads,
             get_downloaded_video_ids,
             get_offline_stream,
+            commands::local_media::local_media_library,
+            commands::local_media::local_media_add_folder,
+            commands::local_media::local_media_remove_folder,
+            commands::local_media::local_media_exclude_folder,
+            commands::local_media::local_media_rescan,
+            commands::local_media::local_media_cancel_scan,
+            commands::local_media::local_media_report_playback,
+            commands::local_media::get_local_stream,
+            commands::local_media::local_media_cover,
+            commands::local_media::local_media_save_frame,
+            commands::local_media::local_media_pick_subtitle,
+            commands::local_media::local_media_trash,
             delete_downloads,
             clear_downloads,
             create_download_collection,
@@ -499,6 +838,12 @@ pub fn run() {
             observe_channel_uploads,
             mark_not_interested,
             record_feed_impressions,
+            record_seen_videos,
+            seen_video_ids_among,
+            commands::recap::recap_record_batch,
+            commands::recap::recap_index,
+            commands::recap::recap_summary,
+            commands::recap::recap_week,
             commands::home_feed::home_feed_open,
             commands::home_feed::home_feed_refresh,
             commands::home_feed::home_feed_viewport,
@@ -510,8 +855,10 @@ pub fn run() {
             complete_onboarding,
             get_onboarding_status,
             get_flow_persona,
+            get_profile_interests,
             get_brain_snapshot,
             get_taste_overview,
+            get_neighbour_channels,
             get_recommendation_events,
             unblock_topic,
             add_blocked_topic,
@@ -524,47 +871,59 @@ pub fn run() {
             clear_channel_memory,
             reset_brain,
             get_sponsorblock_segments,
+            get_non_music_segments,
             submit_sponsorblock_segment,
             get_dearrow_override,
+            get_original_title,
             get_return_youtube_dislike,
-            get_music_home,
-            refresh_music_home,
             get_subscription_rotation_feed,
             get_subscription_rss_feed,
+            scan_subscription_collaborations,
             stream_subscription_rss_feed,
+            get_subscription_posts,
+            forget_subscription_posts,
             resolve_channel_id,
-            get_music_artist,
-            get_music_explore,
-            get_music_charts,
             fetch_subtitles,
+            read_subtitle_file,
             get_sabr_debug_state,
             log_frontend_event,
+            crash_report_read,
+            crash_report_dismiss,
+            crash_report_delete,
             read_logs,
             clear_logs,
             logs_dir_path,
             reveal_logs_folder,
+            open_external,
+            reset_visitor_identity,
             startup_render_ok,
             get_graphics_mode,
             set_graphics_mode,
+            start_graphics_trial,
+            graphics_trial_shown,
+            keep_graphics_trial,
+            revert_graphics_trial,
+            linux_codec_source,
+            graphics_report,
             updates_supported,
             set_player_fullscreen,
             commands::window::set_window_background,
-            // --- Web browser tabs ---
-            commands::browser::browser_show,
-            commands::browser::browser_navigate,
-            commands::browser::browser_set_bounds,
-            commands::browser::browser_hide,
-            commands::browser::browser_close,
-            commands::browser::browser_retain,
-            commands::browser::browser_reload,
-            commands::browser::browser_stop,
+            commands::app_font::save_custom_font,
+            commands::app_font::read_custom_font,
+            commands::theme::theme_file_state,
+            commands::theme::create_theme_file,
+            commands::theme::reveal_theme_file,
+            commands::theme::watch_theme_file,
             // --- Pop-out (picture-in-picture) player window ---
             open_pip_window,
+            open_app_window,
+            app_window_session,
             pip_session,
             close_pip_window,
             set_pip_always_on_top,
             pip_window_ready,
             focus_main_window,
+            focus_pip_source_window,
             // --- Shorts feed ---
             get_shorts_feed,
             load_more_shorts,
@@ -602,10 +961,16 @@ pub fn run() {
             lyrics_http_get,
             get_music_stream,
             proxy_image_url,
+            proxy_artwork_loop,
+            romanize_lyrics,
+            get_music_captions_lrc,
             image_proxy_base,
             // --- Dedicated music brain (separate from flow_neuro) ---
             record_music_interaction,
             dislike_music_artist,
+            set_favourite_music_artist,
+            favourite_music_artist,
+            get_music_artist_insights,
             block_music_artist,
             unblock_music_artist,
             get_blocked_music_artists,
@@ -617,23 +982,120 @@ pub fn run() {
             get_music_brain_snapshot,
             get_music_taste_profile,
             reset_music_brain,
+            // --- Music queue restore and long-track resume ---
+            save_music_queue_state,
+            load_music_queue_state,
+            clear_music_queue_state,
+            save_music_resume_position,
+            get_music_resume_position,
             // --- Flow Local Sync (P2P LAN) ---
             sync_device_info,
+            linked_status,
+            linked_devices,
+            linked_create,
+            linked_create_lan,
+            linked_create_webdav,
+            linked_update_login,
+            linked_start_login_change,
+            linked_finish_login_change,
+            linked_cancel_login_change,
+            linked_preview_restore,
+            linked_restore,
+            linked_replace_recovery,
+            linked_recovery_saved,
+            linked_retry_keychain,
+            linked_rename,
+            linked_remove,
+            linked_added_by,
+            linked_answer_recovery_notice,
+            linked_forget,
+            linked_contest,
+            linked_keep_side,
+            linked_leave,
+            live_consents,
+            live_now,
+            live_send,
+            live_set_consent,
+            live_status,
+            linked_sync_now,
+            linked_left_out,
+            linked_set_left_out,
+            linked_profiles,
+            linked_sync_profile,
+            linked_sync_added_profile,
+            linked_catch_up,
+            linked_stop_profile,
+            linked_delete_profile,
+            linked_choose_profile,
+            linked_dashboard,
+            linked_link_phase,
+            linked_add_device,
+            linked_show_code,
+            linked_ask_to_join,
+            linked_join_requests,
+            linked_accept_join,
+            linked_decline_join,
+            linked_enter_code,
+            linked_answer,
+            linked_cancel,
             sync_status,
             sync_start_host,
             sync_host_receive,
             sync_scan_join,
             sync_respond_consent,
             sync_cancel,
+            sync_firewall_help,
+            list_notes,
+            save_note,
+            delete_notes,
+            save_note_subject,
+            save_notes_order,
+            restore_notes,
             get_notifications,
             get_unread_notification_count,
             mark_notifications_read,
             delete_notification,
+            restore_notification,
             clear_notifications,
+            get_upcoming_reminders,
+            set_upcoming_reminder,
+            cancel_upcoming_reminder,
             check_subscriptions_now,
+            // --- AiSList channel filter ---
+            ai_list_status,
+            ai_list_refresh,
+            ai_list_matcher_data,
+            ai_list_learn_handles,
+            ai_list_match_channels,
+            ai_list_source_settings,
+            ai_list_check_report,
+            ai_list_submit_report,
             // --- Discord Rich Presence ---
             set_discord_presence,
-            clear_discord_presence
+            clear_discord_presence,
+            // --- Music tray ---
+            music_tray_supported,
+            music_tray_update,
+            set_shell_pages,
+            take_launch_page,
+            take_launch_link,
+            set_download_progress,
+            global_media_keys_supported,
+            global_media_keys_set,
+            system_output_watch,
+            music_tray_hide,
+            // --- Scrobbling ---
+            scrobble_status,
+            scrobble_top_artists,
+            scrobble_similar_tracks,
+            scrobble_sign_in,
+            scrobble_sign_out,
+            scrobble_set_own_key,
+            scrobble_now_playing,
+            scrobble_listened,
+            scrobble_love,
+            scrobble_flush,
+            scrobble_retry_keychain
         ])
         .build(context)
         .expect("error while building Flow Desktop")
@@ -641,6 +1103,10 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             if let tauri::RunEvent::Reopen { .. } = event {
                 macos_window::reopen(app_handle);
+            }
+
+            if let tauri::RunEvent::Exit = event {
+                relaunch::on_exit(&app_handle.env());
             }
 
             // Flush the resident brain to disk on shutdown so the debounce window is never lost.

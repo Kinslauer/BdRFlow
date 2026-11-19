@@ -3,7 +3,7 @@
 
 use std::collections::HashSet;
 
-use super::card::{Card, number_in};
+use super::card::{Card, age_of};
 
 pub const FRESH_SUB_WINDOW_MS: u64 = 72 * 3_600_000;
 const HOME_MAX_SUGGESTION_AGE_MS: u64 = 365 * 86_400_000;
@@ -66,40 +66,26 @@ pub fn is_fresh_subscribed(card: &Card, now_ms: u64) -> bool {
     {
         return true;
     }
-    let text = card.upload_text();
-    if text.contains("second") || text.contains("minute") || text.contains("hour") {
-        return true;
-    }
-    text.contains("day") && number_in(&text).unwrap_or(1) <= 3
+    age_of(&card.upload_text()).is_some_and(|age| age <= FRESH_SUB_WINDOW_MS)
 }
 
 /// Not older than a year; a card that names no age only counts when it is live.
 #[must_use]
 pub fn is_recent_suggestion(card: &Card, now_ms: u64) -> bool {
+    is_within(card, now_ms, HOME_MAX_SUGGESTION_AGE_MS)
+}
+
+/// Published at most `max_age_ms` ago, by its exact time when known, else by its text; a card that
+/// names no age only counts when it is live.
+#[must_use]
+pub fn is_within(card: &Card, now_ms: u64, max_age_ms: u64) -> bool {
     let text = card.upload_text();
     if text.trim().is_empty() || text == "unknown" {
         return card.video.is_live;
     }
-    if card
-        .age_ms(now_ms)
-        .is_some_and(|age| age <= HOME_MAX_SUGGESTION_AGE_MS)
-    {
-        return true;
-    }
-    let value = number_in(&text).unwrap_or(1);
-    if text.contains("second") || text.contains("minute") || text.contains("hour") {
-        true
-    } else if text.contains("day") {
-        value <= 365
-    } else if text.contains("week") {
-        value <= 52
-    } else if text.contains("month") {
-        value <= 12
-    } else if text.contains("year") {
-        value <= 1
-    } else {
-        false
-    }
+    card.age_ms(now_ms)
+        .or_else(|| age_of(&text))
+        .is_some_and(|age| age <= max_age_ms)
 }
 
 /// `feed` with `late` cards placed below `last_visible`, one after every `spacing` cards already
@@ -179,6 +165,7 @@ pub(super) mod tests {
                 view_count_text: None,
                 channel_avatar_url: None,
                 is_live: false,
+                ..Default::default()
             },
             published_at_ms: 0,
         }
@@ -209,5 +196,15 @@ pub(super) mod tests {
         assert!(is_recent_suggestion(&card("a", "c", "11 months ago"), 0));
         assert!(!is_recent_suggestion(&card("a", "c", "2 years ago"), 0));
         assert!(!is_recent_suggestion(&card("a", "c", ""), 0));
+    }
+
+    #[test]
+    fn an_exact_time_wins_over_the_rounded_text() {
+        let day = 86_400_000;
+        let mut upload = card("a", "c", "1 day ago");
+        assert!(is_within(&upload, 0, day));
+        upload.published_at_ms = 1;
+        assert!(!is_within(&upload, 1 + 47 * 3_600_000, day));
+        assert!(is_within(&upload, 1 + 23 * 3_600_000, day));
     }
 }

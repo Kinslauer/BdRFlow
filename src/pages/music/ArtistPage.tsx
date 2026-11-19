@@ -1,23 +1,33 @@
 import { useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
-import { AlertTriangle, Check, ChevronRight, Music2, Play, Plus } from 'lucide-react';
+import { AlertTriangle, Check, ChevronRight, ExternalLink, Music2, Play, Plus, Share2 } from 'lucide-react';
 
 import { Button, type ButtonProps } from '../../components/ui/Button';
 import { SoftBackdrop } from '../../components/ui/SoftBackdrop';
 import { AlbumTrackRow } from '../../components/music/AlbumTrackRow';
+import { ArtistAiNotice } from '../../components/music/ArtistAiNotice';
 import { ArtistSkeleton } from '../../components/music/ArtistSkeleton';
 import { MusicItemCard } from '../../components/music/MusicItemCard';
 import { MusicShelf } from '../../components/music/MusicShelf';
+import { artistListeningLine, useArtistInsights } from '../../lib/useArtistInsights';
 import { useArtistPage, type ArtistMoreEndpoint } from '../../lib/useArtistPage';
 import { usePublishTitle } from '../../lib/usePublishTitle';
 import { useMusicPlayerStore } from '../../store/useMusicPlayerStore';
+import { useSubscriptionStore } from '../../store/useSubscriptionStore';
+import { useUiStore } from '../../store/useUiStore';
 import { getString } from '../../lib/i18n/index';
 import { upgradeAvatarUrl } from '../../lib/thumbnails';
 import { useProxiedImageUrl } from '../../lib/useProxiedImageUrl';
-import type { SongItem } from '../../types/music';
+import type { MusicWatchTarget, SongItem } from '../../types/music';
+import { artistMixQueue } from '../../lib/artistMix';
+import { openExternal } from '../../lib/openExternal';
 import { shuffled } from '../../lib/musicRecall';
+import { shareLink } from '../../lib/clipboard';
+import { youtubeMusicArtistUrl } from '../../lib/youtubeUrl';
 
 const videoIdOf = (track: SongItem) => track.videoId ?? track.id;
+
+const HISTORY_SONGS_SHOWN = 6;
 
 function cx(...parts: Array<string | false | null | undefined>): string {
   return parts.filter(Boolean).join(' ');
@@ -34,7 +44,7 @@ function SectionTitle({ title, onSeeAll }: { title: string; onSeeAll?: () => voi
           className="group flex items-center gap-0.5 text-sm font-medium text-chrome-neutral-400 transition-colors duration-200 ease-out hover:text-chrome-neutral-100"
         >
           {getString('music_show_all')}
-          <ChevronRight className="h-4 w-4 transition-transform group-hover:translate-x-0.5" />
+          <ChevronRight className="h-4 w-4 transition-transform group-hover:translate-x-0.5 rtl:group-hover:-translate-x-0.5 rtl:-scale-x-100" />
         </button>
       ) : null}
     </div>
@@ -108,20 +118,24 @@ function ArtistHeroScaffold({
   subtitle,
   hasSongs,
   following,
+  listening,
   onPlay,
   onShuffle,
   onRadio,
   onToggleFollow,
+  onShare,
 }: {
   title: string;
   thumbnail: string | null;
   subtitle: string;
   hasSongs: boolean;
   following: boolean;
+  listening: string | null;
   onPlay: () => void;
   onShuffle: () => void;
   onRadio: () => void;
   onToggleFollow: () => void;
+  onShare: () => void;
 }) {
   const imageUrl = useProxiedImageUrl(upgradeAvatarUrl(thumbnail, 1200));
 
@@ -162,10 +176,15 @@ function ArtistHeroScaffold({
           <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.2em] text-chrome-neutral-300">
             <span>{getString('music_role_artist')}</span>
           </div>
-          <h1 className="mb-4 mt-3 line-clamp-2 text-6xl font-extrabold leading-none tracking-tighter text-chrome-white lg:text-8xl">
+          <h1 dir="auto" className="mb-4 mt-3 line-clamp-2 text-6xl font-extrabold leading-none tracking-tighter text-chrome-white lg:text-8xl">
             {title}
           </h1>
-          {subtitle ? <p className="text-lg text-chrome-neutral-400">{subtitle}</p> : null}
+          {subtitle ? <p dir="auto" className="text-lg text-chrome-neutral-400">{subtitle}</p> : null}
+          {listening ? (
+            <span className="mt-3 w-fit rounded-full bg-chrome-white/10 px-3 py-1 text-sm font-medium tabular-nums text-chrome-neutral-100">
+              {listening}
+            </span>
+          ) : null}
 
           <div className="mt-7 flex flex-wrap items-center gap-3">
             <ArtistActionButton
@@ -201,10 +220,18 @@ function ArtistHeroScaffold({
               disabled={!hasSongs}
               onClick={onRadio}
               className="h-12 w-12 bg-chrome-white/10 px-0 text-chrome-neutral-50 hover:bg-chrome-white/20 [&>svg]:shrink-0"
-              aria-label="Radio"
-              title="Radio"
+              aria-label={getString('music_radio')}
+              title={getString('music_radio')}
             >
               <RadioGlyph />
+            </ArtistActionButton>
+            <ArtistActionButton
+              onClick={onShare}
+              className="h-12 w-12 bg-chrome-white/10 px-0 text-chrome-neutral-50 hover:bg-chrome-white/20 [&>svg]:shrink-0"
+              aria-label={getString('music_share')}
+              title={getString('music_share')}
+            >
+              <Share2 className="h-5 w-5" />
             </ArtistActionButton>
           </div>
         </div>
@@ -223,8 +250,10 @@ export default function ArtistPage() {
   const { data, loading, error, reload } = useArtistPage(artistId);
   usePublishTitle(data?.header?.title);
 
-  const [following, setFollowing] = useState(false);
+  const followId = (data?.header.id || artistId || '').replace('channel:', '');
+  const following = useSubscriptionStore((state) => state.subscriptions.some((channel) => channel.id === followId));
   const [aboutExpanded, setAboutExpanded] = useState(false);
+  const insights = useArtistInsights(followId || null, data?.header.title);
 
   if (loading && !data) return <ArtistSkeleton />;
 
@@ -255,7 +284,11 @@ export default function ArtistPage() {
     singlesMore,
     videos,
     related,
+    featuredOn,
     about,
+    aboutLinks,
+    shuffle,
+    radio,
   } = data;
   const subtitle = [header.subscriberCountText, header.monthlyListenerCount]
     .filter((part): part is string => Boolean(part?.trim()))
@@ -269,6 +302,22 @@ export default function ArtistPage() {
     void playQueue(queue, 0, header.title);
   };
 
+  // The header's own Shuffle and Radio queues; the page's top songs only when there is none.
+  const startMix = async (target: MusicWatchTarget | null) => {
+    if (target) {
+      try {
+        const queue = await artistMixQueue(target);
+        if (queue.length > 0) {
+          void playQueue(queue, 0, header.title);
+          return;
+        }
+      } catch (error) {
+        console.warn('Artist mix failed; shuffling the top songs instead', error);
+      }
+    }
+    startPlayback(true);
+  };
+
   const playFrom = (list: SongItem[], track: SongItem) => {
     const start = Math.max(0, list.findIndex((item) => videoIdOf(item) === videoIdOf(track)));
     void playQueue(list, start, header.title);
@@ -276,6 +325,14 @@ export default function ArtistPage() {
 
   const openAlbum = (browseId: string) => navigate(`/music/album/${browseId}`);
   const openArtist = (id: string) => navigate(`/music/artist/${id}`);
+
+  const share = () => {
+    void shareLink(header.title, youtubeMusicArtistUrl(followId)).then((result) => {
+      const { showToast } = useUiStore.getState();
+      if (result === 'copied') showToast({ variant: 'success', message: getString('share_link_copied') });
+      if (result === 'failed') showToast({ variant: 'error', message: getString('share_link_copy_failed') });
+    });
+  };
 
   const seeAll = (kind: 'songs' | 'albums', more: ArtistMoreEndpoint | null, sectionTitle: string) => {
     if (!more?.browseId) return;
@@ -292,13 +349,21 @@ export default function ArtistPage() {
         subtitle={subtitle}
         hasSongs={topSongs.length > 0}
         following={following}
+        listening={insights ? artistListeningLine(insights) : null}
         onPlay={() => startPlayback(false)}
-        onShuffle={() => startPlayback(true)}
-        onRadio={() => startPlayback(true)}
-        onToggleFollow={() => setFollowing((value) => !value)}
+        onShuffle={() => void startMix(shuffle)}
+        onRadio={() => void startMix(radio)}
+        onToggleFollow={() => {
+          if (!followId) return;
+          const { subscribe, unsubscribe } = useSubscriptionStore.getState();
+          if (following) void unsubscribe(followId);
+          else void subscribe(followId, header.title, header.thumbnail ?? undefined, { isMusic: true });
+        }}
+        onShare={share}
       />
 
       <main className="mx-auto flex max-w-[1600px] flex-col gap-12 px-8 pt-8">
+        <ArtistAiNotice artistId={followId} name={header.title} />
         {topSongs.length > 0 ? (
           <section data-artist-section="popular">
             <SectionTitle
@@ -329,6 +394,29 @@ export default function ArtistPage() {
                   />
                 );
               })}
+            </div>
+          </section>
+        ) : null}
+
+        {insights && insights.topTracks.length > 0 ? (
+          <section data-artist-section="history">
+            <SectionTitle title={getString('music_artist_your_history')} />
+            <p className="mt-1 text-sm tabular-nums text-chrome-neutral-400">{artistListeningLine(insights)}</p>
+            <div className="mt-4 grid gap-x-12 gap-y-2 lg:grid-cols-2">
+              {insights.topTracks.slice(0, HISTORY_SONGS_SHOWN).map((song, index) => (
+                <AlbumTrackRow
+                  key={videoIdOf(song)}
+                  track={song}
+                  index={index}
+                  isCurrent={currentTrackId === videoIdOf(song)}
+                  isPlaying={isPlaying}
+                  showArtwork
+                  showStreamsColumn={false}
+                  compactActions
+                  onPlay={() => playFrom(insights.topTracks, song)}
+                  onAddToQueue={addToQueue}
+                />
+              ))}
             </div>
           </section>
         ) : null}
@@ -380,6 +468,19 @@ export default function ArtistPage() {
         </section>
 
         <MusicShelf
+          title={getString('music_artist_featured_on')}
+          items={featuredOn}
+          renderItem={(playlist) => (
+            <MusicItemCard
+              variant="playlist"
+              item={playlist}
+              onPlay={() => navigate(`/music/playlist/${playlist.id}`)}
+              onOpen={() => navigate(`/music/playlist/${playlist.id}`)}
+            />
+          )}
+        />
+
+        <MusicShelf
           title={getString('music_artist_related')}
           items={related}
           skeletonShape="circle"
@@ -398,7 +499,7 @@ export default function ArtistPage() {
               }}
               aria-expanded={aboutExpanded}
               className={cx(
-                'group relative mt-12 mb-24 w-full overflow-hidden rounded-2xl bg-surface-container-low p-6 text-left outline-none transition-colors duration-200 ease-out md:p-8 focus-visible:ring-2 focus-visible:ring-[var(--color-primary)]',
+                'group relative mt-12 mb-24 w-full overflow-hidden rounded-2xl bg-surface-container-low p-6 text-start outline-none transition-colors duration-200 ease-out md:p-8 focus-visible:ring-2 focus-visible:ring-[var(--color-primary)]',
                 aboutExpandable
                   ? 'cursor-pointer pb-16 hover:bg-surface-container md:pb-16'
                   : 'cursor-default',
@@ -419,13 +520,23 @@ export default function ArtistPage() {
                 />
               ) : null}
               {aboutExpandable ? (
-                <span className="absolute bottom-5 left-6 z-10 text-sm font-bold text-chrome-neutral-100 md:left-8">
+                <span className="absolute bottom-5 start-6 z-10 text-sm font-bold text-chrome-neutral-100 md:start-8">
                   {aboutExpanded
                     ? getString('music_artist_read_less')
                     : getString('music_artist_read_more')}
                 </span>
               ) : null}
             </button>
+            {aboutLinks.length > 0 ? (
+              <div className="-mt-20 mb-24 flex flex-wrap gap-2">
+                {aboutLinks.map((link) => (
+                  <Button key={link.url} variant="tonal" size="sm" onClick={() => void openExternal(link.url)}>
+                    <ExternalLink className="h-4 w-4" />
+                    {link.label}
+                  </Button>
+                ))}
+              </div>
+            ) : null}
           </section>
         ) : null}
       </main>

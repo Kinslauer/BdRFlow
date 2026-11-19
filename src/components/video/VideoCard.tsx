@@ -4,33 +4,56 @@ import { useBlockedKeywordMatch, useFeedActionsStore } from '../../store/useFeed
 import { useBlockedRevealStore } from '../../lib/blockedContent';
 import { BlockedVideoCard } from './BlockedVideoCard';
 import { useLiveStore } from '../../store/useLiveStore';
-import { Plus, Ban, Check, MoreVertical, Trash2, GripHorizontal, Sparkles, Eye, EyeOff, Clock, ListPlus, Download, User, Info, ExternalLink } from 'lucide-react';
+import { Plus, Ban, Bell, BellRing, Check, Info, ListStart, MoreVertical, Trash2, GripHorizontal, Sparkles, Eye, EyeOff, Clock, ListPlus, ListVideo, Download, User, Share2 } from 'lucide-react';
 import type { VideoSummary } from '../../types/video';
 import { Button } from '../ui/Button';
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useImageFallback } from '../../lib/useImageFallback';
-import { useDeArrowOverride } from '../../lib/useDeArrowOverride';
+import { deArrowThumbnail } from '../../lib/api/foss';
+import { dontRecommendLabel } from '../../lib/dontRecommendLabel';
+import { useDeArrowOverrideState } from '../../lib/useDeArrowOverride';
+import { useOriginalTitle } from '../../lib/useOriginalTitle';
 import { getVideoDetails } from '../../lib/api/youtube';
 import { useSettingsStore } from '../../store/useSettingsStore';
 import { useAppSettingsStore } from '../../store/useAppSettingsStore';
 import { useChannelAvatar } from '../../lib/useChannelAvatar';
-import { isUnavailableYoutubeThumbnail, resolveYoutubeThumbnailCandidates, upgradeAvatarUrl } from '../../lib/thumbnails';
+import { isUnavailableYoutubeThumbnail, resolveYoutubeThumbnailCandidates, upgradeAvatarUrl, avatarSize } from '../../lib/thumbnails';
 import { IS_LINUX_RUNTIME } from '../../lib/platform';
 import { useProxiedImageUrl } from '../../lib/useProxiedImageUrl';
 import { SETTINGS } from '../../lib/settings/schema';
-import { AnchoredPortalMenu, type MenuAnchor } from '../ui/AnchoredPortalMenu';
+import type { MenuAnchor } from '../ui/AnchoredPortalMenu';
+import { MediaMenu, type MediaMenuAction } from '../ui/MediaMenu';
+import { useAiReportAction } from './useAiReportAction';
+import { shareLink } from '../../lib/clipboard';
+import { youtubeWatchUrl } from '../../lib/youtubeUrl';
 import { getString } from '../../lib/i18n/index';
+import { useUpcomingReminderStore } from '../../store/useUpcomingReminderStore';
 import { useWatchLaterStore } from '../../store/useWatchLaterStore';
+import { useWatchedVideoIds } from '../../lib/useWatchedFilter';
+import { isMusicVideo } from '../../lib/utils';
+import { useWatchProgressPercent, useWatchProgressStore } from '../../store/useWatchProgressStore';
+import { isWatched as isWatchedPosition, type WatchedThreshold } from '../../lib/watchedThreshold';
+import { ThumbnailWatchProgress } from './ThumbnailWatchProgress';
+import { VideoDetailsDialog } from './VideoDetailsDialog';
 import { useUiStore } from '../../store/useUiStore';
+import { showSaveFailedToast, showSaveToast } from '../../lib/saveToast';
 import { usePlaylistModalStore } from '../../store/usePlaylistModalStore';
 import { usePlayerStore } from '../../store/usePlayerStore';
-import { isNewTabClick, openVideoInNewTab } from '../../lib/tabs';
 import { useDownloadStore } from '../../store/useDownloadStore';
 import { useDownloadsLibraryStore } from '../../store/useDownloadsLibraryStore';
 import { findDownloadedRecord, useIsDownloaded } from '../../lib/useDownloads';
 import { extractDominantColorFromImage, type Rgb } from '../../lib/useDominantColor';
 import { formatPublishedText, formatYouTubeRelativeTime } from '../../lib/publishedDate';
 import { ColorWash, COLOR_WASH_HOST } from '../ui/ColorWash';
+import { CardPills, ChannelLabel, CollabAvatars, UpcomingBadge } from "./CardMeta";
+import { collaboratorsByline } from "../../lib/collaborators";
+import { backgroundTabClickProps, openedInBackgroundTab, routeForVideo } from '../../lib/openTarget';
+import { openActions } from '../common/openActions';
+import { isLocalMediaId } from '../../lib/localMediaId';
+import { alignToEnd, growFromPoint } from "../../lib/direction";
+import { VideoHoverPreview } from './VideoHoverPreview';
+import { continueFromPreview } from '../../lib/inlinePreviewHandoff';
+import { highlightTerms } from '../../lib/highlightTerms';
 
 export interface VideoCardProps {
   video: VideoSummary;
@@ -38,7 +61,8 @@ export interface VideoCardProps {
   onAddToQueue?: (video: VideoSummary) => void;
   onRemoveFromHistory?: (videoId: string) => void;
   onRemoveFromContinueWatching?: (videoId: string) => void;
-  variant?: 'default' | 'grid' | 'history' | 'continue' | 'list' | 'compact';
+  onRemoveFromLikes?: (videoId: string) => void;
+  variant?: 'default' | 'grid' | 'history' | 'continue' | 'list' | 'compact' | 'search';
   hideChannelAvatar?: boolean;
   showDragHandle?: boolean;
   dragHandleProps?: React.ButtonHTMLAttributes<HTMLButtonElement> & {
@@ -49,6 +73,18 @@ export interface VideoCardProps {
   showAddedDate?: boolean;
   /** Why a feed shows this card, at the top of its menu. */
   reason?: string;
+  /** A short line under the card's details saying why it is here. */
+  reasonLine?: string;
+  /** Whether the card is drawn wider than `hqdefault`; left out, the screen's pixel ratio decides. */
+  highResThumbnail?: boolean;
+  /** Drawn over the thumbnail, such as a download's progress. */
+  thumbnailOverlay?: React.ReactNode;
+  /** Replaces what Remove download does in the menu, for a list that offers Undo. */
+  onRemoveDownload?: () => void;
+  /** Replaces the whole menu, for an item that isn't on YouTube. */
+  menuActions?: MediaMenuAction[];
+  /** The search a `search` row answers; its words are bold in the description excerpt. */
+  searchQuery?: string;
 }
 
 /*
@@ -76,7 +112,7 @@ function LiveBadge({ className }: { className?: string }) {
     <div
       className={`z-10 flex items-center gap-1 rounded bg-primary px-1 py-px text-[11px] font-bold uppercase leading-tight tracking-wide text-on-primary ${className || ''}`}
     >
-      <span className="h-1.5 w-1.5 rounded-full bg-current animate-pulse" />
+      <span className="live-dot h-1.5 w-1.5 rounded-full bg-current animate-pulse" />
       Live
     </div>
   );
@@ -99,6 +135,7 @@ function VideoCardComponent({
   onAddToQueue,
   onRemoveFromHistory,
   onRemoveFromContinueWatching,
+  onRemoveFromLikes,
   variant = 'default',
   hideChannelAvatar,
   showDragHandle = true,
@@ -106,13 +143,23 @@ function VideoCardComponent({
   isDragActive = false,
   showAddedDate = false,
   reason,
+  reasonLine,
+  highResThumbnail,
+  thumbnailOverlay,
+  onRemoveDownload,
+  menuActions: ownMenuActions,
+  searchQuery = '',
 }: VideoCardProps) {
+  // Compiled by the React Compiler pilot (vite.config.ts): a feed renders this card more than anything else.
+  "use memo";
   const navigate = useNavigate();
   const subscribe = useSubscriptionStore((s) => s.subscribe);
   const unsubscribe = useSubscriptionStore((s) => s.unsubscribe);
   const notInterested = useFeedActionsStore((s) => s.notInterested);
   const blockChannelAction = useFeedActionsStore((s) => s.blockChannel);
   const markWatched = useFeedActionsStore((s) => s.markWatched);
+  const markUnwatched = useFeedActionsStore((s) => s.markUnwatched);
+  const isMarkedWatched = useFeedActionsStore((s) => s.watchedVideoIds.has(video.id));
   const moreLikeThis = useFeedActionsStore((s) => s.moreLikeThis);
   const showToast = useUiStore((s) => s.showToast);
   const openAddToPlaylist = usePlaylistModalStore((s) => s.openAddToPlaylist);
@@ -120,6 +167,15 @@ function VideoCardComponent({
   const removeDownloads = useDownloadsLibraryStore((s) => s.remove);
   const isDownloaded = useIsDownloaded(video.id);
   const [showMenu, setShowMenu] = useState(false);
+  const [showDetails, setShowDetails] = useState(false);
+  const watchedThreshold = useAppSettingsStore((s) => s.values[SETTINGS.WATCHED_THRESHOLD]) as WatchedThreshold;
+  const watchedInHistory = useWatchProgressStore((s) => {
+    const entry = s.progress.get(video.id);
+    return !!entry && isWatchedPosition(entry.watchedSeconds, entry.totalSeconds, watchedThreshold);
+  });
+  // The progress store leaves Shorts out; a Short's menu reads history itself, only while open.
+  const shortsWatched = useWatchedVideoIds(showMenu && !!video.isShort);
+  const isWatched = isMarkedWatched || watchedInHistory || shortsWatched.has(video.id);
   const [menuAnchor, setMenuAnchor] = useState<MenuAnchor | null>(null);
   const [dominantColor, setDominantColor] = useState<Rgb | null>(null);
   const [isHovered, setIsHovered] = useState(false);
@@ -127,6 +183,8 @@ function VideoCardComponent({
   const thumbnailRef = useRef<HTMLImageElement>(null);
 
   const isChannel = video.id.startsWith("channel:");
+  // A file on this computer has no channel, and nothing on YouTube to look up its title by.
+  const isLocalFile = isLocalMediaId(video.id);
   const cleanId = isChannel ? video.id.replace("channel:", "") : video.id;
   const channelId = video.channelId || "";
 
@@ -134,6 +192,17 @@ function VideoCardComponent({
   const liveFromStore = useLiveStore((s) => s.liveIds.has(video.id));
   const isLiveVideo = !!video.isLive || liveFromStore;
   const publishedText = formatPublishedText(video);
+  // A Short known from its card opens in the Shorts player, whatever the list.
+  const route = routeForVideo(video);
+  const play = useCallback((event?: React.MouseEvent) => {
+    if (openedInBackgroundTab(event, route)) return;
+    if (route.startsWith("/shorts/")) navigate(route);
+    else {
+      onPlay(video);
+      continueFromPreview(video.id);
+    }
+  }, [video, navigate, onPlay, route]);
+  const tabClickProps = useMemo(() => backgroundTabClickProps(route), [route]);
 
   useEffect(() => {
     if (video.isLive) markLive(video.id);
@@ -143,6 +212,8 @@ function VideoCardComponent({
   // IPC round trip plus a parse of the whole playlist library, several hundred
   // times over, to label a single context-menu entry.
   const isSavedToWatchLater = useWatchLaterStore((s) => s.ids.has(video.id));
+  const isReminded = useUpcomingReminderStore((s) => s.ids.has(video.id));
+  const toggleReminder = useUpcomingReminderStore((s) => s.toggle);
   const saveToWatchLater = useWatchLaterStore((s) => s.add);
   const removeFromWatchLater = useWatchLaterStore((s) => s.remove);
 
@@ -156,21 +227,49 @@ function VideoCardComponent({
   // channel, which multiplied across a large feed floods the backend.
   const hookAvatarUrl = useChannelAvatar(
     isChannel || video.channelAvatarUrl ? null : channelId || null,
+    cardRef,
   );
-  const resolvedAvatarUrl = useProxiedImageUrl(upgradeAvatarUrl(video.channelAvatarUrl || hookAvatarUrl));
-  const channelCardAvatarUrl = useProxiedImageUrl(upgradeAvatarUrl(video.thumbnailUrl));
+  const resolvedAvatarUrl = useProxiedImageUrl(
+    upgradeAvatarUrl(video.channelAvatarUrl || hookAvatarUrl, avatarSize(36)),
+  );
+  // A collaboration names every channel; it opens the first, which is the uploader.
+  const collaborators = video.collaborators ?? [];
+  const isCollab = collaborators.length >= 2;
+  const byline = isCollab ? collaboratorsByline(collaborators) : video.channelName;
+  // Only a channel card draws this; asking for it on every video card cost each an IPC call.
+  const channelCardAvatarUrl = useProxiedImageUrl(isChannel ? upgradeAvatarUrl(video.thumbnailUrl) : undefined);
   // Cached and de-duplicated across cards and remounts by the hook; this used to
   // be a bare `getDeArrowOverride` in an effect, one IPC per card, every mount.
-  const dearrowOverride = useDeArrowOverride(isChannel ? null : video.id, dearrowEnabled);
+  const { override: dearrowOverride, settled: dearrowSettled } = useDeArrowOverrideState(
+    isChannel || isLocalFile ? null : video.id,
+    dearrowEnabled,
+    cardRef,
+  );
   const overriddenTitle = dearrowOverride?.title || null;
-  const overriddenThumbnail = dearrowOverride?.thumbnailUrl || null;
+  const dearrowRandomFrame = useAppSettingsStore((state) => state.values[SETTINGS.DEARROW_RANDOM_FRAME] !== "false");
+  const overriddenThumbnail = deArrowThumbnail(dearrowOverride, dearrowRandomFrame) || null;
 
-  const displayTitle = overriddenTitle || video.title;
+  // Asked only once DeArrow has none to give: its title would replace this one.
+  const originalTitle = useOriginalTitle(
+    isChannel || isLocalFile || overriddenTitle || !dearrowSettled ? null : video.id,
+    cardRef,
+  );
+  const displayTitle = overriddenTitle || originalTitle || video.title;
   const thumbnailCandidates = useMemo(
-    () => resolveYoutubeThumbnailCandidates(video.id, overriddenThumbnail || video.thumbnailUrl),
-    [overriddenThumbnail, video.id, video.thumbnailUrl],
+    () => resolveYoutubeThumbnailCandidates(video.id, overriddenThumbnail || video.thumbnailUrl, highResThumbnail),
+    [highResThumbnail, overriddenThumbnail, video.id, video.thumbnailUrl],
   );
   const { src: displayThumbnail, onError: handleThumbnailError } = useImageFallback(thumbnailCandidates);
+
+  // Channels, live streams, premieres and local files have no storyboard to preview.
+  const hoverPreview = isHovered && !isChannel && !isLiveVideo && !video.isUpcoming && !isLocalMediaId(video.id) ? (
+    <VideoHoverPreview
+      videoId={video.id}
+      durationSeconds={video.durationSeconds}
+      thumbnailRef={thumbnailRef}
+      clearTopEnd={variant === 'history' && Boolean(onRemoveFromHistory)}
+    />
+  ) : null;
 
   const handleMouseEnter = useCallback(() => {
     setIsHovered(true);
@@ -211,41 +310,18 @@ function VideoCardComponent({
     }
   }, [displayThumbnail, dominantColor, handleThumbnailError, isHovered, thumbnailCandidates]);
 
-  // Plain click plays here; Ctrl/Cmd+click or middle-click opens a background tab.
-  const playTargetProps = useMemo(() => ({
-    onClick: (e: React.MouseEvent) => {
-      if (isNewTabClick(e)) {
-        e.preventDefault();
-        e.stopPropagation();
-        openVideoInNewTab(video);
-        return;
-      }
-      onPlay(video);
-    },
-    // Middle-button down would otherwise start the webview's autoscroll.
-    onMouseDown: (e: React.MouseEvent) => {
-      if (e.button === 1) e.preventDefault();
-    },
-    onAuxClick: (e: React.MouseEvent) => {
-      if (e.button !== 1) return;
-      e.preventDefault();
-      e.stopPropagation();
-      openVideoInNewTab(video);
-    },
-  }), [onPlay, video]);
-
   const handleContextMenu = useCallback((e: React.MouseEvent) => {
     if (isChannel) return;
     e.preventDefault();
     e.stopPropagation();
-    setMenuAnchor({ top: e.clientY, left: e.clientX });
+    setMenuAnchor({ top: e.clientY, ...growFromPoint(e.clientX) });
     setShowMenu(true);
   }, [isChannel]);
 
   const openMenuFromDots = useCallback((e: React.MouseEvent) => {
     e.stopPropagation();
     const rect = e.currentTarget.getBoundingClientRect();
-    setMenuAnchor({ top: rect.bottom + 4, right: rect.right });
+    setMenuAnchor({ top: rect.bottom + 4, ...alignToEnd(rect) });
     setShowMenu((prev) => !prev);
   }, []);
 
@@ -255,8 +331,23 @@ function VideoCardComponent({
   );
   const isHistoryCard = variant === 'history';
   const isContinueCard = variant === 'continue';
-  const isListVariant = variant === 'list';
-  const progressPercent = Math.min(100, Math.max(0, video.watchProgressPercent ?? 0));
+  const isSearchRow = variant === 'search';
+  const isListVariant = variant === 'list' || isSearchRow;
+  const showWatchProgress = useAppSettingsStore((s) => s.values[SETTINGS.SHOW_WATCH_PROGRESS] !== 'false');
+  const historyPercent = useWatchProgressPercent(video.id);
+  // History and Continue Watching always show where you are; elsewhere the bar follows the switch.
+  const progressPercent = isHistoryCard || isContinueCard
+    ? Math.min(100, Math.max(0, video.watchProgressPercent ?? 0))
+    : showWatchProgress
+        && !isChannel
+        && !isLiveVideo
+        && !video.isUpcoming
+        && !video.isShort
+        && !isMusicVideo(video)
+        && !thumbnailOverlay
+      ? historyPercent || (isMarkedWatched ? 100 : 0)
+      : 0;
+  const showsProgressBar = isHistoryCard || isContinueCard || progressPercent > 0;
 
   useEffect(() => {
     setDominantColor(null);
@@ -278,8 +369,9 @@ function VideoCardComponent({
     onRemoveFromHistory?.(video.id);
   };
 
-  const handleChannelNavigate = useCallback(async (e: React.MouseEvent<HTMLElement>) => {
-    e.stopPropagation();
+  const handleChannelNavigate = useCallback(async (e?: React.MouseEvent<HTMLElement>) => {
+    e?.stopPropagation();
+    if (isLocalFile) return;
     if (channelId) {
       navigate(`/channel/${channelId}`);
       return;
@@ -293,35 +385,39 @@ function VideoCardComponent({
     } catch (error) {
       console.warn("Failed to resolve channel for video card", error);
     }
-  }, [channelId, navigate, video.id]);
+  }, [channelId, isLocalFile, navigate, video.id]);
 
-  const handleRemoveFromContinueWatching = (e: React.MouseEvent) => {
-    e.stopPropagation();
-    onRemoveFromContinueWatching?.(video.id);
-    setShowMenu(false);
-  };
+
+
+  const toastItem = { title: displayTitle, image: displayThumbnail, shape: "landscape" as const };
 
   const handleToggleWatchLater = async () => {
+    const removing = isSavedToWatchLater;
     try {
-      if (isSavedToWatchLater) {
+      if (removing) {
         await removeFromWatchLater(video.id);
-        showToast({
-          variant: "success",
-          message: getString("video_removed_from_watch_later"),
+        showSaveToast({
+          destination: { kind: "watchLater" },
+          item: toastItem,
+          removed: true,
+          undo: () => saveToWatchLater(video),
         });
         return;
       }
 
       await saveToWatchLater(video);
-      showToast({
-        variant: "success",
-        message: getString("video_saved_to_watch_later"),
+      showSaveToast({
+        destination: { kind: "watchLater" },
+        item: toastItem,
+        undo: () => removeFromWatchLater(video.id),
       });
     } catch (error) {
       console.error("Failed to update Watch Later", error);
-      showToast({
-        variant: "error",
-        message: getString("video_watch_later_failed"),
+      showSaveFailedToast({
+        destination: { kind: "watchLater" },
+        item: toastItem,
+        removed: removing,
+        retry: handleToggleWatchLater,
       });
     }
   };
@@ -330,6 +426,8 @@ function VideoCardComponent({
     const player = usePlayerStore.getState();
     const isDuplicate = player.currentVideo?.id === video.id
       || player.queue.some((item) => item.id === video.id);
+    // addToQueue plays the video in the mini player when nothing is playing.
+    const startsPlayback = !player.currentVideo && player.queue.length === 0;
 
     if (onAddToQueue) {
       onAddToQueue(video);
@@ -337,9 +435,22 @@ function VideoCardComponent({
       player.addToQueue(video);
     }
 
-    showToast({
-      variant: isDuplicate ? "info" : "success",
-      message: getString(isDuplicate ? "queue_duplicate_toast" : "queue_added_toast"),
+    if (isDuplicate) {
+      showToast({ variant: "info", message: getString("queue_duplicate_toast") });
+      return;
+    }
+    if (startsPlayback) {
+      showToast({ variant: "success", message: getString("queue_started_toast") });
+      return;
+    }
+    showSaveToast({
+      destination: { kind: "queue" },
+      item: toastItem,
+      undo: () => {
+        const { queue, removeFromQueue } = usePlayerStore.getState();
+        const index = queue.map((item) => item.id).lastIndexOf(video.id);
+        if (index >= 0) removeFromQueue(index);
+      },
     });
   };
 
@@ -348,161 +459,222 @@ function VideoCardComponent({
       openVideoDownload(video);
       return;
     }
+    if (onRemoveDownload) {
+      onRemoveDownload();
+      return;
+    }
     const record = findDownloadedRecord(video.id, "video");
     if (!record) return;
     await removeDownloads([record.id]);
     showToast({
       variant: "success",
       message: getString("video_download_removed_toast"),
+      image: video.thumbnailUrl,
     });
   };
 
   // ── Menu dropdown ───
+  const handleShare = async () => {
+    const result = await shareLink(displayTitle, youtubeWatchUrl(video.id));
+    if (result === "copied") showToast({ variant: "success", message: getString("share_link_copied") });
+    if (result === "failed") showToast({ variant: "error", message: getString("share_link_copy_failed") });
+  };
+
+  const feedActionFailed = () => showToast({ variant: "error", message: getString("feed_action_failed") });
+
+  const handlePlayNext = () => {
+    const result = usePlayerStore.getState().playVideoNext(video);
+    showToast(
+      result === "duplicate"
+        ? { variant: "info", message: getString("queue_duplicate_toast") }
+        : { variant: "success", message: getString("play_next_toast") },
+    );
+  };
+
+  const handleMarkUnwatched = () =>
+    markUnwatched(video.id)
+      .then(() => showToast({ variant: "success", message: getString("mark_as_unwatched_toast") }))
+      .catch(feedActionFailed);
+
+  const aiReportActions = useAiReportAction(video);
+  // Built when the menu opens: some twenty rows of labels and icons, and a feed renders every
+  // card far more often than anyone opens a menu.
+  const buildMenuActions = (): MediaMenuAction[] => ownMenuActions ?? [
+    {
+      id: "play-next",
+      label: getString("play_next_video"),
+      icon: <ListStart size={16} />,
+      group: "library",
+      onSelect: handlePlayNext,
+    },
+    {
+      id: "queue",
+      label: getString("music_add_to_queue"),
+      tileLabel: getString("menu_tile_queue"),
+      icon: <ListPlus size={18} />,
+      group: "quick",
+      onSelect: handleAddToQueue,
+    },
+    {
+      id: "watch-later",
+      label: getString(isSavedToWatchLater ? "video_remove_from_watch_later" : "video_save_to_watch_later"),
+      tileLabel: getString(isSavedToWatchLater ? "menu_tile_saved" : "menu_tile_save"),
+      icon: <Clock size={18} />,
+      group: "quick",
+      active: isSavedToWatchLater,
+      onSelect: handleToggleWatchLater,
+    },
+    {
+      id: "playlist",
+      label: getString("video_add_to_playlist"),
+      tileLabel: getString("menu_tile_playlist"),
+      icon: <ListVideo size={18} />,
+      group: "quick",
+      onSelect: () => openAddToPlaylist(video),
+    },
+    isDownloaded
+      ? {
+        id: "share",
+        label: getString("share"),
+        tileLabel: getString("menu_tile_share"),
+        icon: <Share2 size={18} />,
+        group: "quick",
+        onSelect: handleShare,
+      }
+      : {
+        id: "download",
+        label: getString("download"),
+        tileLabel: getString("menu_tile_download"),
+        icon: <Download size={18} />,
+        group: "quick",
+        onSelect: handleDownloadAction,
+      },
+    ...(isDownloaded
+      ? [{
+        id: "remove-download",
+        label: getString("video_remove_download"),
+        icon: <Trash2 size={16} />,
+        group: "library" as const,
+        danger: true,
+        onSelect: handleDownloadAction,
+      }]
+      : [{
+        id: "share",
+        label: getString("share"),
+        icon: <Share2 size={16} />,
+        group: "library" as const,
+        onSelect: handleShare,
+      }]),
+    ...(video.isUpcoming && video.upcomingStartMs
+      ? [{
+        id: "remind-me",
+        label: getString(isReminded ? "upcoming_reminder_enabled" : "upcoming_reminder_action"),
+        icon: isReminded ? <BellRing size={16} /> : <Bell size={16} />,
+        group: "library" as const,
+        onSelect: () => void toggleReminder(video, video.upcomingStartMs ?? 0),
+      }]
+      : []),
+    ...(onRemoveFromContinueWatching
+      ? [{
+        id: "remove-continue",
+        label: getString("video_remove_from_continue_watching"),
+        icon: <Trash2 size={16} />,
+        group: "library" as const,
+        danger: true,
+        onSelect: () => onRemoveFromContinueWatching(video.id),
+      }]
+      : []),
+    ...(onRemoveFromLikes
+      ? [{
+        id: "remove-like",
+        label: getString("remove"),
+        icon: <Trash2 size={16} />,
+        group: "library" as const,
+        danger: true,
+        onSelect: () => onRemoveFromLikes(video.id),
+      }]
+      : []),
+    ...openActions(route),
+    {
+      id: "channel",
+      label: getString("video_view_channel"),
+      icon: <User size={16} />,
+      group: "go",
+      onSelect: () => handleChannelNavigate(),
+    },
+    {
+      id: "more-like-this",
+      label: getString("menu_more_like_this"),
+      icon: <Sparkles size={16} />,
+      group: "feed",
+      onSelect: () => moreLikeThis(video),
+    },
+    isWatched
+      ? {
+        id: "mark-unwatched",
+        label: getString("mark_as_unwatched"),
+        icon: <EyeOff size={16} />,
+        group: "feed" as const,
+        onSelect: handleMarkUnwatched,
+      }
+      : {
+        id: "mark-watched",
+        label: getString("menu_mark_watched"),
+        icon: <Eye size={16} />,
+        group: "feed" as const,
+        onSelect: () => markWatched(video),
+      },
+    {
+      id: "details",
+      label: getString("details_metadata"),
+      icon: <Info size={16} />,
+      group: "go",
+      onSelect: () => setShowDetails(true),
+    },
+    {
+      id: "not-interested",
+      label: getString("menu_not_interested"),
+      icon: <Ban size={16} />,
+      group: "feed",
+      danger: true,
+      onSelect: () => notInterested(video).catch(feedActionFailed),
+    },
+    ...(video.channelId
+      ? [{
+        id: "block-channel",
+        label: dontRecommendLabel(video.channelName),
+        icon: <EyeOff size={16} />,
+        group: "feed" as const,
+        danger: true,
+        onSelect: () => blockChannelAction(video).catch(feedActionFailed),
+      }]
+      : []),
+    ...aiReportActions,
+  ];
+
   const renderMenu = () => {
+    if (showDetails) {
+      return (
+        <VideoDetailsDialog
+          video={video}
+          title={displayTitle}
+          durationText={video.durationSeconds ? formatDuration(video.durationSeconds) : null}
+          publishedText={publishedText}
+          whyShown={reason}
+          onClose={() => setShowDetails(false)}
+        />
+      );
+    }
     if (!showMenu || !menuAnchor) return null;
 
     return (
-      <AnchoredPortalMenu
+      <MediaMenu
         anchor={menuAnchor}
         onClose={() => setShowMenu(false)}
-        className="z-50 w-60 rounded-xl border border-chrome-neutral-800 bg-surface-container-high py-1.5"
-      >
-        {reason ? (
-          <div className="flex items-start gap-3 border-b border-chrome-neutral-800 px-3.5 pb-2.5 pt-1.5 text-xs text-chrome-zinc-400">
-            <Info size={14} className="mt-0.5 shrink-0" />
-            <span>
-              <span className="block font-semibold text-chrome-zinc-300">{getString("home_feed_why")}</span>
-              {reason}
-            </span>
-          </div>
-        ) : null}
-        <button
-          type="button"
-          onClick={(e) => {
-            e.stopPropagation();
-            openVideoInNewTab(video);
-            setShowMenu(false);
-          }}
-          className="w-full flex items-center gap-3 px-3.5 py-2.5 text-sm text-chrome-zinc-300 hover:bg-chrome-zinc-800 hover:text-chrome-zinc-100 transition-colors"
-        >
-          <ExternalLink size={16} />
-          {getString("tabs_open_in_new_tab")}
-        </button>
-        <button
-          onClick={(e) => {
-            e.stopPropagation();
-            handleAddToQueue();
-            setShowMenu(false);
-          }}
-          className="w-full flex items-center gap-3 px-3.5 py-2.5 text-sm text-chrome-zinc-300 hover:bg-chrome-zinc-800 hover:text-chrome-zinc-100 transition-colors"
-        >
-          <Plus size={16} />
-          {getString("music_add_to_queue")}
-        </button>
-        <button
-          type="button"
-          onClick={(e) => {
-            e.stopPropagation();
-            openAddToPlaylist(video);
-            setShowMenu(false);
-          }}
-          className="w-full flex items-center gap-3 whitespace-nowrap px-3.5 py-2.5 text-sm text-chrome-zinc-300 hover:bg-chrome-zinc-800 hover:text-chrome-zinc-100 transition-colors"
-        >
-          <ListPlus size={16} />
-          {getString("video_add_to_playlist")}
-        </button>
-        <button
-          type="button"
-          onClick={(e) => {
-            e.stopPropagation();
-            void handleChannelNavigate(e);
-            setShowMenu(false);
-          }}
-          className="w-full flex items-center gap-3 whitespace-nowrap px-3.5 py-2.5 text-sm text-chrome-zinc-300 hover:bg-chrome-zinc-800 hover:text-chrome-zinc-100 transition-colors"
-        >
-          <User size={16} />
-          {getString("video_view_channel")}
-        </button>
-        <button
-          type="button"
-          onClick={(e) => {
-            e.stopPropagation();
-            void handleDownloadAction();
-            setShowMenu(false);
-          }}
-          className="w-full flex items-center gap-3 whitespace-nowrap px-3.5 py-2.5 text-sm text-chrome-zinc-300 hover:bg-chrome-zinc-800 hover:text-chrome-zinc-100 transition-colors"
-        >
-          {isDownloaded ? <Trash2 size={16} /> : <Download size={16} />}
-          {getString(isDownloaded ? "video_remove_download" : "download")}
-        </button>
-        <button
-          type="button"
-          onClick={(e) => {
-            e.stopPropagation();
-            void handleToggleWatchLater();
-            setShowMenu(false);
-          }}
-          className="w-full flex items-center gap-3 whitespace-nowrap px-3.5 py-2.5 text-sm text-chrome-zinc-300 hover:bg-chrome-zinc-800 hover:text-chrome-zinc-100 transition-colors"
-        >
-          <Clock size={16} />
-          {getString(isSavedToWatchLater ? "video_remove_from_watch_later" : "video_save_to_watch_later")}
-        </button>
-        <button
-          onClick={(e) => {
-            e.stopPropagation();
-            void moreLikeThis(video);
-            setShowMenu(false);
-          }}
-          className="w-full flex items-center gap-3 px-3.5 py-2.5 text-sm text-chrome-zinc-300 hover:bg-chrome-zinc-800 hover:text-chrome-zinc-100 transition-colors"
-        >
-          <Sparkles size={16} />
-          More like this
-        </button>
-        <button
-          onClick={(e) => {
-            e.stopPropagation();
-            void markWatched(video);
-            setShowMenu(false);
-          }}
-          className="w-full flex items-center gap-3 px-3.5 py-2.5 text-sm text-chrome-zinc-300 hover:bg-chrome-zinc-800 hover:text-chrome-zinc-100 transition-colors"
-        >
-          <Eye size={16} />
-          Mark as watched
-        </button>
-        <button
-          onClick={(e) => {
-            e.stopPropagation();
-            void notInterested(video).catch(() => showToast({ variant: "error", message: getString("feed_action_failed") }));
-            setShowMenu(false);
-          }}
-          className="w-full flex items-center gap-3 px-3.5 py-2.5 text-sm text-chrome-zinc-300 hover:bg-chrome-zinc-800 hover:text-chrome-zinc-100 transition-colors"
-        >
-          <Ban size={16} />
-          Not interested
-        </button>
-        {onRemoveFromContinueWatching ? (
-          <button
-            onClick={handleRemoveFromContinueWatching}
-            className="w-full flex items-center gap-3 px-3.5 py-2.5 text-sm text-chrome-zinc-300 hover:bg-chrome-zinc-800 hover:text-chrome-zinc-100 transition-colors"
-          >
-            <Trash2 size={16} />
-            {getString("video_remove_from_continue_watching")}
-          </button>
-        ) : null}
-        {video.channelId && (
-          <button
-            onClick={(e) => {
-              e.stopPropagation();
-              void blockChannelAction(video).catch(() => showToast({ variant: "error", message: getString("feed_action_failed") }));
-              setShowMenu(false);
-            }}
-            className="w-full flex items-center gap-3 px-3.5 py-2.5 text-sm text-chrome-zinc-300 hover:bg-chrome-zinc-800 hover:text-chrome-zinc-100 transition-colors"
-          >
-            <EyeOff size={16} />
-            Don't show this channel
-          </button>
-        )}
-      </AnchoredPortalMenu>
+        header={{ title: displayTitle, subtitle: byline, image: displayThumbnail, imageShape: "landscape" }}
+        actions={buildMenuActions()}
+        note={reason ? { title: getString("home_feed_why"), body: reason } : null}
+      />
     );
   };
 
@@ -526,10 +698,10 @@ function VideoCardComponent({
             </div>
           )}
         </div>
-        <h3 className="font-bold text-center text-chrome-zinc-100 line-clamp-1 group-hover:text-primary transition-colors">
+        <h3 dir="auto" className="font-bold text-center text-chrome-zinc-100 line-clamp-1 group-hover:text-primary transition-colors">
           {video.title}
         </h3>
-        <p className="text-xs text-chrome-zinc-400 mb-4">{video.publishedText || "Channel"}</p>
+        <p className="text-xs text-chrome-zinc-400 mb-4">{video.publishedText || getString('search_role_channel')}</p>
         
         <Button
           variant={subStatus ? "secondary" : "primary"}
@@ -538,9 +710,9 @@ function VideoCardComponent({
           onClick={handleSubscribeToggle}
         >
           {subStatus ? (
-            <span className="flex items-center gap-1.5"><Check size={14} /> Subscribed</span>
+            <span className="flex items-center gap-1.5"><Check size={14} /> {getString('subscribed')}</span>
           ) : (
-            <span className="flex items-center gap-1.5"><Plus size={14} /> Subscribe</span>
+            <span className="flex items-center gap-1.5"><Plus size={14} /> {getString('search_subscribe')}</span>
           )}
         </Button>
       </div>
@@ -559,7 +731,8 @@ function VideoCardComponent({
         <ColorWash active={isHovered} color={dominantColor} alpha={0.2} spread="row" />
         <div
           className="relative aspect-video w-40 shrink-0 cursor-pointer overflow-hidden rounded-xl bg-surface-container"
-          {...playTargetProps}
+          onClick={play}
+          {...tabClickProps}
         >
           {displayThumbnail ? (
             <img
@@ -576,19 +749,25 @@ function VideoCardComponent({
           ) : (
             <div className="h-full w-full bg-chrome-zinc-800" />
           )}
+          {hoverPreview}
           {isLiveVideo ? (
-            <LiveBadge className="absolute bottom-1 right-1" />
+            <LiveBadge className="absolute bottom-1 end-1" />
+          ) : video.isUpcoming ? (
+            <UpcomingBadge className="absolute bottom-1 end-1" />
           ) : video.durationSeconds ? (
-            <div className="absolute bottom-1 right-1 z-10 rounded bg-chrome-black/80 px-1 py-px text-[11px] font-medium leading-tight text-chrome-white">
+            <div className={`absolute end-1 z-10 rounded bg-chrome-black/80 px-1 py-px text-[11px] font-medium leading-tight text-chrome-white ${showsProgressBar ? 'bottom-2' : 'bottom-1'}`}>
               {formatDuration(video.durationSeconds)}
             </div>
           ) : null}
+          {showsProgressBar ? <ThumbnailWatchProgress percent={progressPercent} /> : null}
         </div>
 
         <div className="flex min-w-0 flex-1 flex-col">
           <h3
-            {...playTargetProps}
+            onClick={play}
+          {...tabClickProps}
             style={titleClampStyle}
+            dir="auto"
             className="cursor-pointer text-sm font-medium leading-snug text-chrome-neutral-100 transition-colors group-hover:text-primary"
           >
             {displayTitle}
@@ -596,15 +775,16 @@ function VideoCardComponent({
           <button
             type="button"
             onClick={(e) => { void handleChannelNavigate(e); }}
-            className="mt-1 truncate text-left text-[13px] text-chrome-neutral-400 transition-colors hover:text-chrome-neutral-300"
+            className="mt-1 truncate text-start text-[13px] text-chrome-neutral-400 transition-colors hover:text-chrome-neutral-300"
           >
-            {video.channelName}
+            <ChannelLabel name={byline} verified={video.isVerified} />
           </button>
           <div className="text-[13px] text-chrome-neutral-500">
-            {video.viewCountText && <span>{video.viewCountText}</span>}
+            {video.viewCountText && <bdi>{video.viewCountText}</bdi>}
             {video.viewCountText && publishedText && <span className="mx-1">•</span>}
-            {publishedText && <span>{publishedText}</span>}
+            {publishedText && <bdi>{publishedText}</bdi>}
           </div>
+          <CardPills video={video} />
         </div>
 
         <div className="relative shrink-0">
@@ -631,16 +811,16 @@ function VideoCardComponent({
     return (
       <div
         ref={cardRef}
-        className={`group ${COLOR_WASH_HOST} flex w-full flex-row items-center gap-4 rounded-xl px-1 py-2`}
+        className={`group ${COLOR_WASH_HOST} flex w-full flex-row gap-4 rounded-xl px-1 py-2 ${isSearchRow ? 'items-start' : 'items-center'}`}
         onMouseEnter={handleMouseEnter}
         onMouseLeave={handleMouseLeave}
         onContextMenu={handleContextMenu}
       >
         <ColorWash active={isHovered} color={dominantColor} alpha={0.2} spread="row" />
-        {showDragHandle ? (
+        {isSearchRow ? null : showDragHandle ? (
           <button
             type="button"
-            aria-label="Reorder video"
+            aria-label={getString('reorder_item', video.title)}
             className={[
               'shrink-0 rounded-md p-1 text-chrome-neutral-500 transition-colors duration-200 ease-out',
               'hover:text-chrome-neutral-300',
@@ -658,8 +838,9 @@ function VideoCardComponent({
         )}
 
         <div
-          className="relative aspect-video w-40 shrink-0 cursor-pointer overflow-hidden rounded-xl bg-chrome-zinc-900 sm:w-48"
-          {...playTargetProps}
+          className={`relative aspect-video shrink-0 cursor-pointer overflow-hidden rounded-xl bg-chrome-zinc-900 ${isSearchRow ? 'w-56 md:w-72 xl:w-[360px]' : 'w-40 sm:w-48'}`}
+          onClick={play}
+          {...tabClickProps}
         >
           {displayThumbnail ? (
             <img
@@ -676,45 +857,94 @@ function VideoCardComponent({
           ) : (
             <div className="h-full w-full bg-chrome-zinc-800" />
           )}
+          {hoverPreview}
 
           {isLiveVideo ? (
-            <LiveBadge className="absolute bottom-1 right-1" />
+            <LiveBadge className="absolute bottom-1 end-1" />
+          ) : video.isUpcoming ? (
+            <UpcomingBadge className="absolute bottom-1 end-1" />
           ) : video.durationSeconds ? (
-            <div className="absolute bottom-1 right-1 z-10 rounded bg-chrome-black/80 px-1 py-px text-[12px] font-medium leading-tight tracking-wide text-chrome-white">
+            <div className={`absolute end-1 z-10 rounded bg-chrome-black/80 px-1 py-px text-[12px] font-medium leading-tight tracking-wide text-chrome-white ${showsProgressBar ? 'bottom-2' : 'bottom-1'}`}>
               {formatDuration(video.durationSeconds)}
             </div>
           ) : null}
+          {showsProgressBar ? <ThumbnailWatchProgress percent={progressPercent} /> : null}
         </div>
 
-        <div className="flex min-w-0 flex-1 flex-col">
-          <h3
-            {...playTargetProps}
-            style={titleClampStyle}
-            className="cursor-pointer text-sm font-medium leading-snug text-chrome-neutral-100 transition-colors hover:text-[var(--color-primary)]"
-          >
-            {displayTitle}
-          </h3>
-          <button
-            type="button"
-            onClick={(e) => { void handleChannelNavigate(e); }}
-            className="mt-0.5 truncate text-left text-[13px] text-chrome-neutral-400 transition-colors hover:text-chrome-neutral-300"
-          >
-            {video.channelName}
-          </button>
-          <div className="mt-0.5 text-[13px] text-chrome-neutral-500">
-            {showAddedDate && video.addedAtInPlaylist ? (
-              <span>
-                {getString("playlist_video_added_template", formatYouTubeRelativeTime(video.addedAtInPlaylist))}
-              </span>
-            ) : (
-              <>
-                {video.viewCountText && <span>{video.viewCountText}</span>}
-                {video.viewCountText && publishedText && <span className="mx-1">•</span>}
-                {publishedText && <span>{publishedText}</span>}
-              </>
+        {isSearchRow ? (
+          <div className="flex min-w-0 flex-1 flex-col gap-1.5 pt-0.5">
+            <h3
+              onClick={play}
+              {...tabClickProps}
+              dir="auto"
+              className="line-clamp-2 cursor-pointer text-base font-medium leading-snug text-chrome-neutral-100 transition-colors hover:text-[var(--color-primary)]"
+            >
+              {displayTitle}
+            </h3>
+            <div className="text-[13px] tabular-nums text-chrome-neutral-400">
+              {video.viewCountText && <bdi>{video.viewCountText}</bdi>}
+              {video.viewCountText && publishedText && <span className="mx-1">•</span>}
+              {publishedText && <bdi>{publishedText}</bdi>}
+            </div>
+            <button
+              type="button"
+              onClick={(e) => { void handleChannelNavigate(e); }}
+              className="flex min-w-0 items-center gap-2 self-start rounded-full py-0.5 pe-1 text-start text-[13px] text-chrome-neutral-400 transition-colors hover:text-chrome-neutral-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+            >
+              {isCollab ? (
+                <span className="-m-1.5 shrink-0 scale-[0.67]"><CollabAvatars collaborators={collaborators} /></span>
+              ) : (
+                <span className="h-6 w-6 shrink-0 overflow-hidden rounded-full bg-chrome-zinc-800">
+                  {resolvedAvatarUrl && <img src={resolvedAvatarUrl} alt="" className="h-full w-full object-cover" loading="lazy" />}
+                </span>
+              )}
+              <ChannelLabel name={byline} verified={video.isVerified} />
+            </button>
+            {video.snippet && (
+              <p dir="auto" className="line-clamp-2 max-w-3xl text-[13px] leading-relaxed text-chrome-neutral-400">
+                {highlightTerms(video.snippet, searchQuery).map((piece, index) =>
+                  piece.match ? <strong key={index} className="font-semibold text-chrome-neutral-200">{piece.text}</strong> : piece.text,
+                )}
+              </p>
             )}
+            {reasonLine && <p className="truncate text-[13px] text-chrome-neutral-500">{reasonLine}</p>}
+            <CardPills video={video} />
           </div>
-        </div>
+        ) : (
+          <div className="flex min-w-0 flex-1 flex-col">
+            <h3
+              onClick={play}
+            {...tabClickProps}
+              style={titleClampStyle}
+              dir="auto"
+              className="cursor-pointer text-sm font-medium leading-snug text-chrome-neutral-100 transition-colors hover:text-[var(--color-primary)]"
+            >
+              {displayTitle}
+            </h3>
+            <button
+              type="button"
+              onClick={(e) => { void handleChannelNavigate(e); }}
+              className="mt-0.5 truncate text-start text-[13px] text-chrome-neutral-400 transition-colors hover:text-chrome-neutral-300"
+            >
+              <ChannelLabel name={byline} verified={video.isVerified} />
+            </button>
+            <div className="mt-0.5 text-[13px] text-chrome-neutral-500">
+              {showAddedDate && video.addedAtInPlaylist ? (
+                <span>
+                  {getString("playlist_video_added_template", formatYouTubeRelativeTime(video.addedAtInPlaylist))}
+                </span>
+              ) : (
+                <>
+                  {video.viewCountText && <bdi>{video.viewCountText}</bdi>}
+                  {video.viewCountText && publishedText && <span className="mx-1">•</span>}
+                  {publishedText && <bdi>{publishedText}</bdi>}
+                </>
+              )}
+            </div>
+            {reasonLine && <p className="truncate text-[13px] text-chrome-neutral-500">{reasonLine}</p>}
+            <CardPills video={video} />
+          </div>
+        )}
 
         <div className="relative shrink-0">
           <button
@@ -744,7 +974,8 @@ function VideoCardComponent({
       <ColorWash active={isHovered} color={dominantColor} alpha={0.2} />
       <div
         className="relative w-full aspect-video rounded-xl overflow-hidden bg-chrome-zinc-900 cursor-pointer"
-        {...playTargetProps}
+        onClick={play}
+          {...tabClickProps}
       >
         {displayThumbnail ? (
           <img
@@ -761,31 +992,29 @@ function VideoCardComponent({
         ) : (
           <div className="w-full h-full bg-chrome-zinc-800" />
         )}
+        {hoverPreview}
 
         {isLiveVideo ? (
-          <LiveBadge className={`absolute right-1 ${isHistoryCard || isContinueCard ? 'bottom-2' : 'bottom-1'}`} />
+          <LiveBadge className={`absolute end-1 ${showsProgressBar ? 'bottom-2' : 'bottom-1'}`} />
+        ) : video.isUpcoming ? (
+          <UpcomingBadge className="absolute bottom-1 end-1" />
         ) : video.durationSeconds ? (
-          <div className={`absolute right-1 z-10 bg-chrome-black/80 px-1 py-px rounded text-[12px] font-medium text-chrome-white leading-tight tracking-wide ${isHistoryCard || isContinueCard ? 'bottom-2' : 'bottom-1'}`}>
+          <div className={`absolute end-1 z-10 bg-chrome-black/80 px-1 py-px rounded text-[12px] font-medium text-chrome-white leading-tight tracking-wide ${showsProgressBar ? 'bottom-2' : 'bottom-1'}`}>
             {formatDuration(video.durationSeconds)}
           </div>
         ) : null}
 
+        {showsProgressBar ? <ThumbnailWatchProgress percent={progressPercent} /> : null}
+
         {isHistoryCard || isContinueCard ? (
           <>
-            <div className="absolute bottom-0 left-0 z-10 h-[3px] w-full bg-chrome-neutral-600">
-              <div
-                className="h-full bg-primary"
-                style={{ width: `${progressPercent}%` }}
-              />
-            </div>
-
             {isHistoryCard && onRemoveFromHistory ? (
               <button
                 type="button"
                 onClick={handleRemoveFromHistory}
-                title="Remove from history"
-                aria-label="Remove from history"
-                className="absolute right-2 top-2 z-30 flex h-8 w-8 items-center justify-center rounded-full border border-chrome-white/15 bg-chrome-black/80 text-chrome-white opacity-0 transition-colors duration-200 ease-out hover:bg-chrome-red-950/50 hover:text-chrome-red-300 group-hover:opacity-100"
+                title={getString('music_remove_from_history')}
+                aria-label={getString('music_remove_from_history')}
+                className="absolute end-2 top-2 z-30 flex h-8 w-8 items-center justify-center rounded-full border border-chrome-white/15 bg-chrome-black/80 text-chrome-white opacity-0 transition-colors duration-200 ease-out hover:bg-chrome-red-950/50 hover:text-chrome-red-300 group-hover:opacity-100"
               >
                 <Trash2 size={15} />
               </button>
@@ -794,20 +1023,26 @@ function VideoCardComponent({
         ) : null}
 
         <div className="pointer-events-none absolute inset-0 bg-chrome-black/0 group-hover:bg-chrome-black/10 transition-colors duration-200" />
+        {thumbnailOverlay}
       </div>
 
-      <div className="flex gap-3 pr-1 relative z-10">
+      <div className="flex gap-3 pe-1 relative z-10">
         {!hideChannelAvatar && (
           <div 
             onClick={(e) => { void handleChannelNavigate(e); }}
-            className="w-9 h-9 rounded-full bg-chrome-zinc-800 shrink-0 overflow-hidden flex items-center justify-center cursor-pointer mt-0.5 hover:opacity-80 transition-opacity"
+            className={`w-9 h-9 shrink-0 flex items-center justify-center cursor-pointer mt-0.5 hover:opacity-80 transition-opacity ${
+              isCollab ? "" : "rounded-full bg-chrome-zinc-800 overflow-hidden"
+            }`}
           >
-            {resolvedAvatarUrl ? (
+            {isCollab ? (
+              <CollabAvatars collaborators={collaborators} />
+            ) : resolvedAvatarUrl ? (
               <img
                 src={resolvedAvatarUrl}
                 alt={video.channelName}
                 className="h-full w-full object-cover"
                 loading="lazy"
+                decoding="async"
               />
             ) : (
               <span className="text-xs font-semibold text-chrome-zinc-400">{channelInitials}</span>
@@ -817,25 +1052,29 @@ function VideoCardComponent({
 
         <div className="flex flex-col flex-1 min-w-0">
           <h3
-            {...playTargetProps}
+            onClick={play}
+          {...tabClickProps}
             style={titleClampStyle}
+            dir="auto"
             className="text-chrome-zinc-100 text-sm font-medium leading-snug cursor-pointer hover:text-[var(--color-primary)] transition-colors"
           >
             {displayTitle}
           </h3>
           <div
             onClick={(e) => { void handleChannelNavigate(e); }}
-            className="text-chrome-zinc-400 text-[13px] mt-0.5 truncate cursor-pointer hover:text-chrome-zinc-300 transition-colors"
+            className={`text-chrome-zinc-400 text-[13px] mt-0.5 truncate transition-colors ${isLocalFile ? "" : "cursor-pointer hover:text-chrome-zinc-300"}`}
           >
-            {video.channelName}
+            <ChannelLabel name={byline} verified={video.isVerified} />
           </div>
 
           {/* View Count + Published */}
-          <div className="text-chrome-zinc-500 text-[13px] flex items-center gap-0 mt-0">
-            {video.viewCountText && <span>{video.viewCountText}</span>}
+          <div className="text-chrome-zinc-500 text-[13px]">
+            {video.viewCountText && <bdi>{video.viewCountText}</bdi>}
             {video.viewCountText && publishedText && <span className="mx-1">•</span>}
-            {publishedText && <span>{publishedText}</span>}
+            {publishedText && <bdi>{publishedText}</bdi>}
           </div>
+          {reasonLine && <p className="truncate text-[13px] text-chrome-neutral-500">{reasonLine}</p>}
+          <CardPills video={video} />
         </div>
 
         {/* Three-dot menu button */}
@@ -867,7 +1106,7 @@ function VideoCardGate(props: VideoCardProps) {
     <BlockedVideoCard
       video={props.video}
       keyword={keyword}
-      listLayout={props.variant === 'list' || props.variant === 'compact'}
+      listLayout={props.variant === 'list' || props.variant === 'compact' || props.variant === 'search'}
     />
   );
 }

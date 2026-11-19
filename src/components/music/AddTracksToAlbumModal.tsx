@@ -6,7 +6,9 @@ import { upgradeMusicImageUrl } from "../../lib/thumbnails";
 import { useProxiedImageUrl } from "../../lib/useProxiedImageUrl";
 import { useDebounce } from "../../lib/useDebounce";
 import { searchMusicTyped } from "../../lib/api/music";
-import { useAlbumLibraryStore } from "../../store/useAlbumLibraryStore";
+import { albumDetailPath, useAlbumLibraryStore } from "../../store/useAlbumLibraryStore";
+import { showSaveToast } from "../../lib/saveToast";
+import { songToastItem } from "../../lib/songLikeToast";
 import { useUiStore } from "../../store/useUiStore";
 import type { SongItem, YTItem } from "../../types/music";
 
@@ -40,8 +42,8 @@ function ResultRow({
       )}
 
       <div className="min-w-0 flex-1">
-        <p className="line-clamp-1 text-sm font-medium text-chrome-neutral-100">{song.title}</p>
-        {subtitle && <p className="line-clamp-1 text-xs text-chrome-neutral-500">{subtitle}</p>}
+        <p dir="auto" className="line-clamp-1 text-sm font-medium text-chrome-neutral-100">{song.title}</p>
+        {subtitle && <p dir="auto" className="line-clamp-1 text-xs text-chrome-neutral-500">{subtitle}</p>}
       </div>
 
       {added ? (
@@ -69,6 +71,7 @@ export function AddTracksToAlbumModal() {
     s.searchAlbumId ? s.albums.find((a) => a.id === s.searchAlbumId) : undefined,
   );
   const addTrack = useAlbumLibraryStore((s) => s.addTrack);
+  const removeTrack = useAlbumLibraryStore((s) => s.removeTrack);
   const close = useAlbumLibraryStore((s) => s.closeTrackSearch);
   const showToast = useUiStore((s) => s.showToast);
 
@@ -120,7 +123,15 @@ export function AddTracksToAlbumModal() {
 
   const handleAdd = async (song: SongItem) => {
     await addTrack(albumId, song);
-    showToast({ variant: "success", message: getString("album_added_toast") });
+    if (!album) {
+      showToast({ variant: "success", message: getString("album_added_toast") });
+      return;
+    }
+    showSaveToast({
+      destination: { kind: "album", path: albumDetailPath(album), name: album.title },
+      item: songToastItem(song),
+      undo: () => removeTrack(albumId, songVideoId(song)),
+    });
   };
 
   return (
@@ -136,7 +147,7 @@ export function AddTracksToAlbumModal() {
           <div className="min-w-0">
             <h3 className="text-lg font-bold text-chrome-neutral-100">{getString("album_add_tracks")}</h3>
             {album ? (
-              <p className="mt-0.5 line-clamp-1 text-sm text-chrome-neutral-400">{album.title}</p>
+              <p dir="auto" className="mt-0.5 line-clamp-1 text-sm text-chrome-neutral-400">{album.title}</p>
             ) : null}
           </div>
           <button
@@ -162,7 +173,7 @@ export function AddTracksToAlbumModal() {
           {loading ? <Loader2 size={16} className="shrink-0 animate-spin text-chrome-neutral-500" /> : null}
         </div>
 
-        <div className="mt-3 min-h-0 flex-1 space-y-1 overflow-y-auto hide-scrollbar">
+        <div className="mt-3 min-h-0 flex-1 space-y-1 overflow-y-auto">
           {results.length > 0 ? (
             results.map((song, index) => (
               <ResultRow

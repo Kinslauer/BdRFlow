@@ -1,19 +1,18 @@
-import React, { useState, useEffect, useLayoutEffect, useRef } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import {
-  AudioLines,
   Captions,
-  Check,
   ChevronLeft,
   ChevronRight,
   Expand,
-  Gauge,
   ListVideo,
   Maximize2,
+  MessageSquareText,
+  MessagesSquare,
   Minimize2,
-  Monitor,
   Pause,
   PictureInPicture2,
   Play,
+  ScrollText,
   Settings as SettingsIcon,
   SkipBack,
   SkipForward,
@@ -21,15 +20,32 @@ import {
   Volume1,
   Volume2,
   VolumeX,
-  Sliders,
 } from "lucide-react";
-import { usePlayerStore, type PlaybackRate } from "../../store/usePlayerStore";
+import { usePlayerStore, type FullscreenPanel, type PlaybackRate } from "../../store/usePlayerStore";
+import { useShallow } from "zustand/react/shallow";
 import { useSettingsStore, type SponsorBlockCategory } from "../../store/useSettingsStore";
-import type { AudioTrack, CaptionTrack, StreamVariant, VideoChapter } from "../../types/video";
-import { SubtitleCustomizer } from "./SubtitleCustomizer";
+import type {
+  AudioTrack,
+  CaptionTrack,
+  HeatmapMarker,
+  StoryboardLevel,
+  StreamVariant,
+  VideoChapter,
+} from "../../types/video";
+import { HeatmapStrip } from "./HeatmapStrip";
+import { PREVIEW_WIDTH, paintStoryboardTile, pickStoryboardLevel, storyboardTileHeight } from "../../lib/seekPreview";
+import { proxiedImage } from "../../lib/imageProxy";
+import { useImageProxyStore } from "../../store/useImageProxyStore";
+import { AutoplaySwitch } from "./AutoplaySwitch";
+import { PlayerSettingsMenu, qualityLabel, type SettingsPane } from "./PlayerSettingsMenu";
+import { PlayOnButton } from "../playon/PlayOnButton";
+import { PLAYER_MENU_OWNER_ATTR } from "../../lib/playerMenuDismiss";
 import { SponsorBlockSubmitDialog } from "./SponsorBlockSubmitDialog";
 import {
   PROGRESS_EVENTS,
+  cssPercent,
+  snapToBarPixel,
+  watchBarSteps,
   segmentFillPercent,
   setStyleIfChanged,
   setTextIfChanged,
@@ -37,9 +53,15 @@ import {
 } from "../../lib/playerProgress";
 import { SponsorBlockIcon } from "../ui/SponsorBlockIcon";
 import { sponsorBlockCategoryLabel } from "../../lib/sponsorBlockCategories";
+import { isPointSegment, seekBarSegments } from "../../lib/sponsorBlockPolicy";
 import { getString } from "../../lib/i18n/index";
+import { isAtLiveEdge, liveEdgePosition, liveWindow, readLiveTiming, secondsBehindLive } from "../../lib/liveEdge";
 import { Slider } from "../ui/Slider";
-import { videoCodecLabel } from "../../lib/settings/playerRuntime";
+import { useWheelVolume } from "../../lib/useWheelVolume";
+import { useVolumeLevel } from "../../lib/audio/volumeBoost";
+import { usePlayerButton } from "../../lib/playerButtons";
+import { SETTINGS } from "../../lib/settings/schema";
+import { useAppSettingsStore } from "../../store/useAppSettingsStore";
 
 export interface FlowPlayerControlsProps {
   title?: string;
@@ -67,10 +89,6 @@ export interface FlowPlayerControlsProps {
   selectedAudioTrackId?: string | null;
   setSelectedAudioTrackId: (id: string | null) => void;
 
-  bufferedPct: number;
-
-  sleepMinutes: number;
-  setSleepMinutes: React.Dispatch<React.SetStateAction<number>>;
 
   muted: boolean;
   setMuted: React.Dispatch<React.SetStateAction<boolean>>;
@@ -82,12 +100,17 @@ export interface FlowPlayerControlsProps {
   togglePictureInPicture: () => void;
   showPipButton?: boolean;
   showFullscreenTitle?: boolean;
+  /** The pop-out window has no page under the video, so it keeps the title outside fullscreen. */
+  isPopOut?: boolean;
 
   seekTo: (time: number) => void;
   togglePlay: () => void;
+  stepFrame?: (direction: 1 | -1) => void;
   speedOptions?: PlaybackRate[];
   speedSliderEnabled?: boolean;
   onSelectPlaybackRate?: (playbackRate: PlaybackRate) => void;
+  /** The 360 view switch in the settings menu; null where it can't show. */
+  spherical?: { shown: boolean; onToggle: (shown: boolean) => void } | null;
 
   settingsOpen: boolean;
   setSettingsOpen: React.Dispatch<React.SetStateAction<boolean>>;
@@ -95,29 +118,22 @@ export interface FlowPlayerControlsProps {
   setIsScrubbing: React.Dispatch<React.SetStateAction<boolean>>;
 
   chapters?: VideoChapter[];
+  /** The most-replayed graph drawn above the seek bar. */
+  heatmap?: HeatmapMarker[];
+  /** Preview frames shown while hovering the seek bar. */
+  storyboard?: StoryboardLevel[];
   activeQualityLabel?: string;
 }
 
-type SettingsPane = "root" | "speed" | "quality" | "captions" | "captions-customize" | "audio" | "sleep";
-
 const defaultSpeedOptions: PlaybackRate[] = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2];
-const sleepOptions = [
-  { label: "Off", minutes: 0 },
-  { label: "15 min", minutes: 15 },
-  { label: "30 min", minutes: 30 },
-  { label: "45 min", minutes: 45 },
-  { label: "1 hour", minutes: 60 },
-];
 
 function cx(...classes: Array<string | false | null | undefined>) {
   return classes.filter(Boolean).join(" ");
 }
 
-// The seekable DVR window of a live stream: [start, end] in player-timeline seconds.
-function liveWindow(video: HTMLVideoElement) {
-  const len = video.seekable.length;
-  if (!len) return { start: 0, end: 0 };
-  return { start: video.seekable.start(0), end: video.seekable.end(len - 1) };
+/** The time pill's first number: where playback is, or with a minus how much is left. */
+export function elapsedOrRemaining(current: number, duration: number, remaining: boolean): string {
+  return remaining && duration > 0 ? `-${formatTime(Math.max(0, duration - current))}` : formatTime(current);
 }
 
 function formatTime(value: number) {
@@ -150,9 +166,6 @@ export const FlowPlayerControls: React.FC<FlowPlayerControlsProps> = ({
   audioTracks = [],
   selectedAudioTrackId,
   setSelectedAudioTrackId,
-  bufferedPct,
-  sleepMinutes,
-  setSleepMinutes,
   muted,
   setMuted,
   isFullscreen,
@@ -161,23 +174,28 @@ export const FlowPlayerControls: React.FC<FlowPlayerControlsProps> = ({
   togglePictureInPicture,
   showPipButton = true,
   showFullscreenTitle = false,
+  isPopOut = false,
   seekTo,
   togglePlay,
+  stepFrame,
   speedOptions = defaultSpeedOptions,
   speedSliderEnabled = false,
   onSelectPlaybackRate,
+  spherical = null,
   settingsOpen,
   setSettingsOpen,
   isScrubbing,
   setIsScrubbing,
   chapters = [],
+  heatmap,
+  storyboard,
   activeQualityLabel,
 }) => {
+  // Field by field: a bare `usePlayerStore()` re-rendered the controls on every time tick.
   const {
     isPlaying,
     currentVideo,
     volume,
-    setVolume,
     playbackRate,
     setPlaybackRate,
     duration,
@@ -190,17 +208,114 @@ export const FlowPlayerControls: React.FC<FlowPlayerControlsProps> = ({
     setIsChaptersPanelOpen,
     isQueuePanelOpen,
     setIsQueuePanelOpen,
-  } = usePlayerStore();
+    fullscreenPanel,
+    setFullscreenPanel,
+    isLiveChatAvailable,
+    isCommentsAvailable,
+    queue,
+    playlistContext,
+    isLiveChatOpen,
+    setIsLiveChatOpen,
+  } = usePlayerStore(
+    useShallow((state) => ({
+      isPlaying: state.isPlaying,
+      currentVideo: state.currentVideo,
+      volume: state.volume,
+      playbackRate: state.playbackRate,
+      setPlaybackRate: state.setPlaybackRate,
+      duration: state.duration,
+      playNext: state.playNext,
+      playPrevious: state.playPrevious,
+      isTheaterMode: state.isTheaterMode,
+      setIsTheaterMode: state.setIsTheaterMode,
+      sponsorBlockSegments: state.sponsorBlockSegments,
+      isChaptersPanelOpen: state.isChaptersPanelOpen,
+      setIsChaptersPanelOpen: state.setIsChaptersPanelOpen,
+      isQueuePanelOpen: state.isQueuePanelOpen,
+      setIsQueuePanelOpen: state.setIsQueuePanelOpen,
+      fullscreenPanel: state.fullscreenPanel,
+      setFullscreenPanel: state.setFullscreenPanel,
+      isLiveChatAvailable: state.isLiveChatAvailable,
+      isCommentsAvailable: state.isCommentsAvailable,
+      queue: state.queue,
+      playlistContext: state.playlistContext,
+      isLiveChatOpen: state.isLiveChatOpen,
+      setIsLiveChatOpen: state.setIsLiveChatOpen,
+    })),
+  );
 
-  const { sponsorBlockColors, sponsorBlockEnabled, sbSubmitEnabled } = useSettingsStore();
+  const showNextPrevious = usePlayerButton("nextPrevious");
+  const showVolume = usePlayerButton("volume");
+  const showChapters = usePlayerButton("chapters");
+  const showQueue = usePlayerButton("queue") && (queue.length > 1 || playlistContext !== null);
+  const showAutoplay = usePlayerButton("autoplay");
+  const showLiveChat = usePlayerButton("liveChat");
+  const showComments = usePlayerButton("comments");
+  const showSponsorBlock = usePlayerButton("sponsorBlock");
+  const showQuality = usePlayerButton("quality");
+  const showCaptions = usePlayerButton("captions");
+  const showPlayOn = usePlayerButton("playOn");
+  const showTheater = usePlayerButton("theater");
+  const showFullscreen = usePlayerButton("fullscreen");
+  const frameStepEnabled = useAppSettingsStore((s) => s.values[SETTINGS.FRAME_STEP_BUTTONS_ENABLED] === "true");
+  const idleStripEnabled = useAppSettingsStore((s) => s.values[SETTINGS.IDLE_PROGRESS_STRIP_ENABLED] !== "false");
+  const [showRemaining, setShowRemaining] = useState(false);
+  const showRemainingRef = useRef(showRemaining);
+  showRemainingRef.current = showRemaining;
+  const idleStripRef = useRef<HTMLDivElement>(null);
+
+  const { level: volumeLevel, maxLevel, setLevel: setVolumeLevel } = useVolumeLevel();
+  const changeVolume = (value: number) => {
+    setVolumeLevel(value);
+    setMuted(value === 0);
+  };
+  const volumeWheelRef = useWheelVolume({
+    volume: volumeLevel,
+    max: maxLevel,
+    muted,
+    onVolumeChange: changeVolume,
+    onUnmute: () => setMuted(false),
+  });
+
+  // In fullscreen the panel buttons drive the side panel beside the video instead of the sidebar.
+  const sidebarPanelOpen: Partial<Record<FullscreenPanel, boolean>> = {
+    queue: isQueuePanelOpen,
+    chapters: isChaptersPanelOpen,
+    chat: isLiveChatOpen,
+  };
+  const panelOpen = (panel: FullscreenPanel) =>
+    isFullscreen ? fullscreenPanel === panel : Boolean(sidebarPanelOpen[panel]);
+  const togglePanel = (panel: FullscreenPanel) => {
+    if (isFullscreen) setFullscreenPanel(fullscreenPanel === panel ? null : panel);
+    else if (panel === "queue") setIsQueuePanelOpen(!isQueuePanelOpen);
+    else if (panel === "chapters") setIsChaptersPanelOpen(!isChaptersPanelOpen);
+    else if (panel === "chat") setIsLiveChatOpen(!isLiveChatOpen);
+  };
+  const panelButtonClass = (panel: FullscreenPanel) =>
+    cx("grid h-7 w-7 place-items-center rounded-full hover:bg-chrome-white/10", panelOpen(panel) && "bg-chrome-white/15 text-primary/90");
+
+  const { sponsorBlockColors, sponsorBlockActions, sponsorBlockEnabled, sbSubmitEnabled } = useSettingsStore(
+    useShallow((state) => ({
+      sponsorBlockColors: state.sponsorBlockColors,
+      sponsorBlockActions: state.sponsorBlockActions,
+      sponsorBlockEnabled: state.sponsorBlockEnabled,
+      sbSubmitEnabled: state.sbSubmitEnabled,
+    })),
+  );
+  const barSegments = React.useMemo(
+    () => (sponsorBlockEnabled ? seekBarSegments(sponsorBlockSegments, sponsorBlockActions) : []),
+    [sponsorBlockActions, sponsorBlockEnabled, sponsorBlockSegments],
+  );
   const selectPlaybackRate = onSelectPlaybackRate ?? setPlaybackRate;
 
   const [settingsPane, setSettingsPane] = useState<SettingsPane>("root");
   const [submitDialogOpen, setSubmitDialogOpen] = useState(false);
   const [submitAtSeconds, setSubmitAtSeconds] = useState(0);
   const chapterPillRef = useRef<HTMLButtonElement>(null);
-  const progressBarRef = useRef<HTMLDivElement>(null);
   const playheadRef = useRef<HTMLDivElement>(null);
+  // Hovered or being dragged: the only time the thumb shows, so the only time it is moved.
+  const seekBarActiveRef = useRef(false);
+  const drawSeekBarRef = useRef<() => void>(() => {});
   const currentTimeRef = useRef<HTMLSpanElement>(null);
   const durationTimeRef = useRef<HTMLSpanElement>(null);
   const hoverPillRef = useRef<HTMLDivElement>(null);
@@ -208,6 +323,12 @@ export const FlowPlayerControls: React.FC<FlowPlayerControlsProps> = ({
   const hoverSegmentRef = useRef<HTMLSpanElement>(null);
   const hoverSegmentDotRef = useRef<HTMLSpanElement>(null);
   const hoverSegmentLabelRef = useRef<HTMLSpanElement>(null);
+  const hoverPreviewRef = useRef<HTMLDivElement>(null);
+  const liveDotRef = useRef<HTMLSpanElement>(null);
+  const timePillRef = useRef<HTMLDivElement>(null);
+  const proxyBase = useImageProxyStore((state) => state.base);
+  const previewLevel = pickStoryboardLevel(storyboard);
+  const previewHeight = previewLevel ? storyboardTileHeight(previewLevel) : 0;
 
   const segments = React.useMemo(() => {
     if (isLive || !chapters || chapters.length === 0) {
@@ -217,7 +338,7 @@ export const FlowPlayerControls: React.FC<FlowPlayerControlsProps> = ({
     const firstChapter = sorted[0];
     if (firstChapter && firstChapter.startSeconds > 0) {
       sorted.unshift({
-        title: "Intro",
+        title: getString('player_intro'),
         startSeconds: 0,
         endSeconds: firstChapter.startSeconds,
       });
@@ -232,11 +353,13 @@ export const FlowPlayerControls: React.FC<FlowPlayerControlsProps> = ({
     return capped;
   }, [chapters, duration, isLive]);
 
-  const bufferedPctRef = useRef(bufferedPct);
-  useLayoutEffect(() => {
-    bufferedPctRef.current = bufferedPct;
-  }, [bufferedPct]);
   const animateProgress = shouldAnimateProgress(isPlaying, shouldShowControls, isScrubbing);
+
+  // A drag can end away from the bar, where no mouseleave follows it.
+  useEffect(() => {
+    const track = containerRef.current?.querySelector("[data-progress-track]");
+    seekBarActiveRef.current = isScrubbing || Boolean(track?.matches(":hover"));
+  }, [isScrubbing, containerRef]);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -246,44 +369,61 @@ export const FlowPlayerControls: React.FC<FlowPlayerControlsProps> = ({
     const bufferedFills = [...container.querySelectorAll<HTMLElement>(".chapter-buffered-fill")];
     const chapterTitle = chapterPillRef.current?.querySelector<HTMLElement>(".chapter-title");
     let video = container.querySelector("video");
+    let steps = 0;
+    const stopWatchingWidth = watchBarSteps(container.querySelector("[data-progress-track]"), (next) => (steps = next));
 
     const updateProgress = () => {
       if (!video?.isConnected) video = container.querySelector("video");
       if (!video) return;
       const cur = video.currentTime;
+      // The thumb is scaled to nothing unless the bar is hovered or dragged.
+      const playhead = seekBarActiveRef.current ? playheadRef.current : null;
 
-      // Live: the seekbar tracks the DVR window and the time shows real broadcast elapsed.
+      // Live: the seekbar tracks the DVR window without jittering at the live edge.
       if (isLive) {
         const { start, end } = liveWindow(video);
         const win = Math.max(1, end - start);
-        const livePct = `${Math.min(100, Math.max(0, ((cur - start) / win) * 100))}%`;
-        setStyleIfChanged(progressBarRef.current, "width", livePct);
+        const timing = readLiveTiming(video);
+        const atEdge = isAtLiveEdge(cur, end, timing);
+        const livePct = atEdge
+          ? "100%"
+          : cssPercent(Math.min(100, Math.max(0, (snapToBarPixel(cur - start, win, steps) / win) * 100)));
         for (const fill of [...progressFills, ...bufferedFills]) setStyleIfChanged(fill, "width", livePct);
-        setStyleIfChanged(playheadRef.current, "left", livePct);
+        setStyleIfChanged(playhead, "left", livePct);
         setStyleIfChanged(chapterPillRef.current, "display", "none");
-        const offset = parseFloat(video.dataset.liveOffset || "0");
-        setTextIfChanged(currentTimeRef.current, formatTime(cur + offset));
+        // The Live button beside it already says so at the edge.
+        setStyleIfChanged(timePillRef.current, "display", atEdge ? "none" : "");
+        if (!atEdge) setTextIfChanged(currentTimeRef.current, `-${formatTime(secondsBehindLive(cur, end, timing))}`);
+        const dotClass = atEdge
+          ? "live-dot h-1.5 w-1.5 rounded-full bg-chrome-red-500 animate-pulse"
+          : "h-1.5 w-1.5 rounded-full bg-chrome-zinc-500";
+        if (liveDotRef.current && liveDotRef.current.className !== dotClass) liveDotRef.current.className = dotClass;
         return;
       }
+      setStyleIfChanged(timePillRef.current, "display", "");
 
       const dur = video.duration || duration || 0;
-      const pct = `${dur > 0 ? Math.min(100, Math.max(0, (cur / dur) * 100)) : 0}%`;
-      setStyleIfChanged(progressBarRef.current, "width", pct);
-      setStyleIfChanged(playheadRef.current, "left", pct);
+      // Every bar below is drawn from the same snapped position, so none of them is rewritten
+      // until the playhead has moved a whole device pixel.
+      const shown = snapToBarPixel(cur, dur, steps);
+      const pct = cssPercent(dur > 0 ? Math.min(100, Math.max(0, (shown / dur) * 100)) : 0);
+      setStyleIfChanged(playhead, "left", pct);
 
       for (const fill of progressFills) {
         const start = parseFloat(fill.dataset.start || "0");
         const end = parseFloat(fill.dataset.end || "0");
-        setStyleIfChanged(fill, "width", `${segmentFillPercent(cur, start, end)}%`);
+        setStyleIfChanged(fill, "width", cssPercent(segmentFillPercent(shown, start, end)));
       }
-      const bufferedTime = (bufferedPctRef.current / 100) * dur;
+      const bufferedEnd = video.buffered.length > 0 ? video.buffered.end(video.buffered.length - 1) : 0;
+      const bufferedTime = snapToBarPixel(bufferedEnd, dur, steps);
       for (const fill of bufferedFills) {
         const start = parseFloat(fill.dataset.start || "0");
         const end = parseFloat(fill.dataset.end || "0");
-        setStyleIfChanged(fill, "width", `${segmentFillPercent(bufferedTime, start, end)}%`);
+        setStyleIfChanged(fill, "width", cssPercent(segmentFillPercent(bufferedTime, start, end)));
       }
 
-      setTextIfChanged(currentTimeRef.current, formatTime(cur));
+      setStyleIfChanged(idleStripRef.current, "width", pct);
+      setTextIfChanged(currentTimeRef.current, elapsedOrRemaining(cur, dur, showRemainingRef.current));
       setTextIfChanged(durationTimeRef.current, formatTime(dur));
 
       const activeChapter = segments?.find((c) => cur >= c.startSeconds && cur <= c.endSeconds);
@@ -296,8 +436,11 @@ export const FlowPlayerControls: React.FC<FlowPlayerControlsProps> = ({
     };
 
     updateProgress();
+    drawSeekBarRef.current = updateProgress;
     const source = video;
-    for (const event of PROGRESS_EVENTS) source?.addEventListener(event, updateProgress);
+    // "progress" too, so the buffered part of the bar grows while paused.
+    const events = [...PROGRESS_EVENTS, "progress"] as const;
+    for (const event of events) source?.addEventListener(event, updateProgress);
 
     let frame: number | null = null;
     if (animateProgress) {
@@ -310,9 +453,10 @@ export const FlowPlayerControls: React.FC<FlowPlayerControlsProps> = ({
 
     return () => {
       if (frame !== null) cancelAnimationFrame(frame);
-      for (const event of PROGRESS_EVENTS) source?.removeEventListener(event, updateProgress);
+      stopWatchingWidth();
+      for (const event of events) source?.removeEventListener(event, updateProgress);
     };
-  }, [animateProgress, containerRef, duration, segments, isLive]);
+  }, [animateProgress, containerRef, duration, segments, isLive, showRemaining]);
 
   const progressPct =
     duration > 0
@@ -321,33 +465,46 @@ export const FlowPlayerControls: React.FC<FlowPlayerControlsProps> = ({
 
   const supportedQualities = qualities;
 
-  const selectedCaption =
-    captions.find((caption) => caption.id === selectedCaptionId) || null;
-  const selectedAudioTrack =
-    audioTracks.find((track) => track.id === selectedAudioTrackId) ||
-    audioTracks.find((track) => track.isDefault) ||
-    audioTracks[0] ||
-    null;
-
-  useEffect(() => {
-    if (!settingsOpen) {
-      setSettingsPane("root");
-    }
-  }, [settingsOpen]);
-
   const updateHoverPreview = (clientX: number, trackEl?: HTMLElement) => {
     const pill = hoverPillRef.current;
-    if (!pill || isLive || !(duration > 0)) return;
+    if (!pill) return;
     const track =
       trackEl ?? containerRef.current?.querySelector<HTMLElement>("[data-progress-track]");
     if (!track) return;
     const rect = track.getBoundingClientRect();
     if (rect.width <= 0) return;
-    // Clamp so the pill keeps tracking at the track edges during a drag.
     const x = Math.min(rect.width, Math.max(0, clientX - rect.left));
-    pill.style.left = `${x}px`;
+
+    if (isLive) {
+      const video = containerRef.current?.querySelector("video");
+      if (video && video.seekable.length) {
+        const { start, end } = liveWindow(video);
+        const win = Math.max(1, end - start);
+        const targetTime = start + (x / rect.width) * win;
+        const timing = readLiveTiming(video);
+        pill.style.left = `${Math.min(rect.width - 24, Math.max(24, x))}px`;
+        pill.style.opacity = "1";
+        if (hoverTextRef.current) {
+          hoverTextRef.current.textContent = isAtLiveEdge(targetTime, end, timing)
+            ? getString("live_badge")
+            : `-${formatTime(secondsBehindLive(targetTime, end, timing))}`;
+        }
+        if (hoverSegmentRef.current) {
+          hoverSegmentRef.current.style.display = "none";
+        }
+      }
+      return;
+    }
+    if (!(duration > 0)) return;
+    // A preview frame is wider than the pill's text; keep it inside the player.
+    const half = previewLevel ? PREVIEW_WIDTH / 2 : 0;
+    pill.style.left = `${Math.min(rect.width - half, Math.max(half, x))}px`;
     pill.style.opacity = "1";
     const time = (x / rect.width) * duration;
+    const preview = hoverPreviewRef.current;
+    if (preview && previewLevel) {
+      paintStoryboardTile(preview, previewLevel, time, (url) => proxiedImage(url, proxyBase));
+    }
     if (hoverTextRef.current) {
       const chapter = segments?.find((c) => time >= c.startSeconds && time <= c.endSeconds);
       hoverTextRef.current.textContent = chapter?.title
@@ -355,11 +512,9 @@ export const FlowPlayerControls: React.FC<FlowPlayerControlsProps> = ({
         : formatTime(time);
     }
     if (hoverSegmentRef.current && hoverSegmentDotRef.current && hoverSegmentLabelRef.current) {
-      const sbSegment = sponsorBlockEnabled
-        ? sponsorBlockSegments.find(
-            (candidate) => time >= candidate.segment[0] && time <= candidate.segment[1],
-          )
-        : undefined;
+      const sbSegment = barSegments.find(
+        (candidate) => time >= candidate.segment[0] && time <= candidate.segment[1],
+      );
       hoverSegmentRef.current.style.display = sbSegment ? "flex" : "none";
       if (sbSegment) {
         hoverSegmentDotRef.current.style.backgroundColor =
@@ -432,51 +587,42 @@ export const FlowPlayerControls: React.FC<FlowPlayerControlsProps> = ({
   const seekToLiveEdge = () => {
     const video = containerRef.current?.querySelector("video");
     if (video && video.seekable.length) {
-      seekTo(video.seekable.end(video.seekable.length - 1));
+      seekTo(liveEdgePosition(liveWindow(video), readLiveTiming(video)));
     }
   };
 
   const handleProgressMove = (event: React.MouseEvent<HTMLDivElement>) => {
+    if (!seekBarActiveRef.current) {
+      seekBarActiveRef.current = true;
+      // Put the thumb where the video is before it springs into view.
+      drawSeekBarRef.current();
+    }
     updateHoverPreview(event.clientX, event.currentTarget);
   };
 
-  const renderSettingRow = (
-    label: string,
-    value: React.ReactNode,
-    icon: React.ReactNode,
-    onClick: () => void
-  ) => (
-    <button
-      type="button"
-      onClick={onClick}
-      className="flex h-11 w-full items-center gap-3 rounded-md px-3 text-left text-sm text-chrome-zinc-100 transition-colors hover:bg-chrome-white/10"
-    >
-      <span className="grid h-7 w-7 place-items-center text-chrome-zinc-300">
-        {icon}
-      </span>
-      <span className="min-w-0 flex-1 font-medium">{label}</span>
-      <span className="max-w-[46%] truncate text-right text-chrome-zinc-300">
-        {value}
-      </span>
-      <ChevronRight size={16} className="text-chrome-zinc-400" />
-    </button>
-  );
-
   return (
     <>
+      {idleStripEnabled && !isLive && !shouldShowControls && (
+        <div className="pointer-events-none absolute inset-x-0 bottom-0 z-20 h-[3px] bg-chrome-white/25">
+          <div ref={idleStripRef} className="h-full bg-primary" style={{ width: `${progressPct}%` }} />
+        </div>
+      )}
       <div
         className={cx(
-          "pointer-events-none absolute inset-0 z-20 flex h-full w-full flex-col justify-end bg-gradient-to-t from-chrome-black/85 via-chrome-black/40 to-transparent pt-24 transition-opacity duration-200",
+          "pointer-events-none absolute inset-0 z-20 flex h-full w-full flex-col justify-end pt-24 transition-opacity duration-200",
           isTheaterMode ? "px-4 pb-3 sm:px-6 sm:pb-4 lg:px-8" : "px-3 pb-3 sm:px-5 sm:pb-4",
           shouldShowControls ? "opacity-100" : "opacity-0"
         )}
       >
+        {/* The scrim only covers the band the controls sit in. Spread over the whole player it was
+            blended into every video frame, across every pixel of the picture. */}
+        <div className="absolute inset-x-0 bottom-0 -z-10 h-56 max-h-full bg-gradient-to-t from-chrome-black/85 via-chrome-black/40 to-transparent" />
         <div
           className="pointer-events-auto"
           onClick={(event) => event.stopPropagation()}
         >
-          {title && (!isFullscreen || showFullscreenTitle) && (
-            <div className="mb-2 hidden max-w-[70%] truncate text-sm font-bold text-chrome-white/95 sm:block">
+          {title && (isFullscreen ? showFullscreenTitle : isPopOut) && (
+            <div dir="auto" className="mb-2 hidden max-w-[70%] truncate text-sm font-bold text-chrome-white/95 sm:block">
               {title}
             </div>
           )}
@@ -486,6 +632,7 @@ export const FlowPlayerControls: React.FC<FlowPlayerControlsProps> = ({
             className="group/seekbar relative flex h-6 cursor-pointer items-center"
             onMouseMove={handleProgressMove}
             onMouseLeave={() => {
+              seekBarActiveRef.current = isScrubbing;
               // During a drag the document-level pointermove owns the pill.
               if (!isScrubbing) hideHoverPreview();
             }}
@@ -496,6 +643,8 @@ export const FlowPlayerControls: React.FC<FlowPlayerControlsProps> = ({
             onMouseUp={() => setIsScrubbing(false)}
             onClick={(event) => handlePointerSeek(event.clientX)}
           >
+            {!isLive && <HeatmapStrip markers={heatmap} duration={duration} />}
+
             {/* Split Chapter Seekbar Track — the whole track springs taller on hover/scrub, mirroring the mobile seekbar. */}
             <div className="relative flex h-full w-full select-none items-center gap-[3px] pointer-events-none">
               {segments.map((segment, idx) => {
@@ -526,9 +675,10 @@ export const FlowPlayerControls: React.FC<FlowPlayerControlsProps> = ({
                       />
 
                       {/* SponsorBlock segments drawn above the progress fill so they stay visible after playback passes them. */}
-                      {sponsorBlockEnabled && sponsorBlockSegments.map((sbSeg) => {
+                      {barSegments.map((sbSeg) => {
                         const sStart = sbSeg.segment[0];
-                        const sEnd = sbSeg.segment[1];
+                        // A highlight is a single moment: a short mark, or it wouldn't be drawn.
+                        const sEnd = isPointSegment(sbSeg) ? sStart + Math.max(1, duration * 0.004) : sbSeg.segment[1];
                         const overlapStart = Math.max(segment.startSeconds, sStart);
                         const overlapEnd = Math.min(segment.endSeconds, sEnd);
                         if (overlapStart < overlapEnd) {
@@ -555,13 +705,6 @@ export const FlowPlayerControls: React.FC<FlowPlayerControlsProps> = ({
               })}
             </div>
 
-            {/* Invisible native progress tracking width marker */}
-            <div
-              ref={progressBarRef}
-              className="absolute pointer-events-none opacity-0"
-              style={{ width: `${progressPct}%` }}
-            />
-
             {/* Playhead thumb — hidden until hover/scrub, then springs in: white knob + primary ring + soft state layer, like the mobile thumb. */}
             <div
               ref={playheadRef}
@@ -584,6 +727,13 @@ export const FlowPlayerControls: React.FC<FlowPlayerControlsProps> = ({
                 className="absolute bottom-8 -translate-x-1/2 flex flex-col items-center pointer-events-none z-50 opacity-0 transition-opacity duration-75"
                 style={{ left: 0 }}
               >
+                {previewLevel && (
+                  <div
+                    ref={hoverPreviewRef}
+                    className="mb-1.5 overflow-hidden rounded-lg border border-chrome-white/10 bg-chrome-black bg-no-repeat"
+                    style={{ width: PREVIEW_WIDTH, height: previewHeight }}
+                  />
+                )}
                 <div className="bg-chrome-black/80 border border-chrome-white/10 px-2 py-1 rounded-2xl text-chrome-white min-w-max text-center flex flex-col items-center gap-0.5 leading-tight">
                   <span ref={hoverTextRef} className="text-[12px] font-medium font-sans" />
                   <span
@@ -600,14 +750,16 @@ export const FlowPlayerControls: React.FC<FlowPlayerControlsProps> = ({
 
           <div className="flex items-center justify-between gap-3">
             <div className="flex min-w-0 items-center gap-1 sm:gap-2">
-              <button
-                type="button"
-                title="Previous"
-                onClick={playPrevious}
-                className="grid h-7 w-7 place-items-center rounded-full hover:bg-chrome-white/10"
-              >
-                <SkipBack size={19} fill="currentColor" />
-              </button>
+              {showNextPrevious && (
+                <button
+                  type="button"
+                  title={getString('previous')}
+                  onClick={playPrevious}
+                  className="grid h-7 w-7 place-items-center rounded-full hover:bg-chrome-white/10"
+                >
+                  <SkipBack size={19} fill="currentColor" />
+                </button>
+              )}
               <button
                 type="button"
                 title={isPlaying ? "Pause" : "Play"}
@@ -620,19 +772,44 @@ export const FlowPlayerControls: React.FC<FlowPlayerControlsProps> = ({
                   <Play size={24} fill="currentColor" className="ml-0.5" />
                 )}
               </button>
-              <button
-                type="button"
-                title="Next"
-                onClick={() => playNext()}
-                className="grid h-7 w-7 place-items-center rounded-full hover:bg-chrome-white/10"
-              >
-                <SkipForward size={19} fill="currentColor" />
-              </button>
-
-              <div className="group/volume hidden items-center sm:flex bg-chrome-black/20 rounded-full hover:pr-2">
+              {frameStepEnabled && !isPlaying && stepFrame && (
+                <>
+                  <button
+                    type="button"
+                    title={getString("player_previous_frame")}
+                    aria-label={getString("player_previous_frame")}
+                    onClick={() => stepFrame(-1)}
+                    className="grid h-7 w-7 place-items-center rounded-full hover:bg-chrome-white/10"
+                  >
+                    <ChevronLeft size={19} />
+                  </button>
+                  <button
+                    type="button"
+                    title={getString("player_next_frame")}
+                    aria-label={getString("player_next_frame")}
+                    onClick={() => stepFrame(1)}
+                    className="grid h-7 w-7 place-items-center rounded-full hover:bg-chrome-white/10"
+                  >
+                    <ChevronRight size={19} />
+                  </button>
+                </>
+              )}
+              {showNextPrevious && (
                 <button
                   type="button"
-                  title="Mute"
+                  title={getString('next')}
+                  onClick={() => playNext()}
+                  className="grid h-7 w-7 place-items-center rounded-full hover:bg-chrome-white/10"
+                >
+                  <SkipForward size={19} fill="currentColor" />
+                </button>
+              )}
+
+              {showVolume && (
+              <div ref={volumeWheelRef} className="group/volume hidden items-center sm:flex bg-chrome-black/20 rounded-full hover:pr-2">
+                <button
+                  type="button"
+                  title={getString('music_mute')}
                   onClick={() => setMuted((value) => !value)}
                   className="grid h-7 w-7 place-items-center rounded-full hover:bg-chrome-white/10"
                 >
@@ -646,22 +823,26 @@ export const FlowPlayerControls: React.FC<FlowPlayerControlsProps> = ({
                 </button>
                 <div className="w-0 overflow-hidden opacity-0 transition-all group-hover/volume:w-20 group-hover/volume:opacity-100">
                   <Slider
-                    aria-label="Volume"
+                    aria-label={getString('music_volume')}
                     min={0}
-                    max={1}
+                    max={maxLevel}
                     step={0.01}
-                    value={muted ? 0 : volume}
-                    onChange={(value) => {
-                      setVolume(value);
-                      setMuted(value === 0);
-                    }}
+                    value={muted ? 0 : volumeLevel}
+                    onChange={changeVolume}
                   />
                 </div>
 
               </div>
+              )}
 
               <div className="ml-1 flex items-center gap-1.5">
-                <div className="whitespace-nowrap text-xs font-semibold text-chrome-white sm:text-sm bg-chrome-black/20 rounded-full px-2 py-1">
+                <div
+                  ref={timePillRef}
+                  role={isLive ? undefined : "button"}
+                  title={isLive ? undefined : getString("player_time_toggle")}
+                  onClick={isLive ? undefined : () => setShowRemaining((value) => !value)}
+                  className={cx("whitespace-nowrap text-xs font-semibold text-chrome-white sm:text-sm bg-chrome-black/20 rounded-full px-2 py-1 tabular-nums", !isLive && "cursor-pointer")}
+                >
                   <span ref={currentTimeRef} />
                   {!isLive && (
                     <>
@@ -674,20 +855,20 @@ export const FlowPlayerControls: React.FC<FlowPlayerControlsProps> = ({
                 {isLive && (
                   <button
                     type="button"
-                    title="Go to live"
+                    title={getString('player_go_to_live')}
                     onClick={seekToLiveEdge}
                     className="flex items-center gap-1 whitespace-nowrap rounded-full bg-chrome-black/20 px-2 py-1 text-xs font-bold uppercase tracking-wide text-chrome-white hover:bg-chrome-white/10"
                   >
-                    <span className="h-1.5 w-1.5 rounded-full bg-chrome-red-500 animate-pulse" />
-                    Live
+                    <span ref={liveDotRef} className="live-dot h-1.5 w-1.5 rounded-full bg-chrome-red-500 animate-pulse" />
+                    {getString("live_badge")}
                   </button>
                 )}
               </div>
 
               <button
-                ref={chapterPillRef}
+                ref={showChapters ? chapterPillRef : undefined}
                 type="button"
-                onClick={() => setIsChaptersPanelOpen(!isChaptersPanelOpen)}
+                onClick={() => togglePanel("chapters")}
                 className="hidden items-center gap-1.5 text-xs font-medium text-chrome-white sm:text-sm bg-chrome-black/20 hover:bg-chrome-white/10 rounded-full px-2 py-1 transition-all select-none cursor-pointer active:scale-95 group/pill max-w-[150px] sm:max-w-[260px] truncate"
               >
                 <span className="chapter-title truncate"></span>
@@ -696,23 +877,59 @@ export const FlowPlayerControls: React.FC<FlowPlayerControlsProps> = ({
             </div>
 
             <div className="flex items-center gap-1 sm:gap-2 bg-chrome-black/20 rounded-full px-1 py-1">
-              <button
-                type="button"
-                title={getString("queue_title")}
-                aria-label={getString("queue_title")}
-                onClick={() => setIsQueuePanelOpen(!isQueuePanelOpen)}
-                className={cx(
-                  "grid h-7 w-7 place-items-center rounded-full hover:bg-chrome-white/10",
-                  isQueuePanelOpen && "bg-chrome-white/15 text-primary/90"
-                )}
-              >
-                <ListVideo size={19} />
-              </button>
-              {sbSubmitEnabled && currentVideo && (
+              {isFullscreen && showChapters && (
                 <button
                   type="button"
-                  title="Submit SponsorBlock segment"
-                  aria-label="Submit SponsorBlock segment"
+                  title={getString("player_panel_chapters")}
+                  aria-label={getString("player_panel_chapters")}
+                  aria-pressed={panelOpen("chapters")}
+                  onClick={() => togglePanel("chapters")}
+                  className={panelButtonClass("chapters")}
+                >
+                  <ScrollText size={19} />
+                </button>
+              )}
+              {showQueue && (
+                <button
+                  type="button"
+                  title={getString("queue_title")}
+                  aria-label={getString("queue_title")}
+                  aria-pressed={panelOpen("queue")}
+                  onClick={() => togglePanel("queue")}
+                  className={panelButtonClass("queue")}
+                >
+                  <ListVideo size={19} />
+                </button>
+              )}
+              {isLiveChatAvailable && showLiveChat && (
+                <button
+                  type="button"
+                  title={getString("live_chat_title")}
+                  aria-label={getString("live_chat_title")}
+                  aria-pressed={panelOpen("chat")}
+                  onClick={() => togglePanel("chat")}
+                  className={panelButtonClass("chat")}
+                >
+                  <MessageSquareText size={19} />
+                </button>
+              )}
+              {isFullscreen && isCommentsAvailable && showComments && (
+                <button
+                  type="button"
+                  title={getString("watch_comments")}
+                  aria-label={getString("watch_comments")}
+                  aria-pressed={panelOpen("comments")}
+                  onClick={() => togglePanel("comments")}
+                  className={panelButtonClass("comments")}
+                >
+                  <MessagesSquare size={19} />
+                </button>
+              )}
+              {sbSubmitEnabled && currentVideo && showSponsorBlock && (
+                <button
+                  type="button"
+                  title={getString('player_submit_sponsorblock_segment')}
+                  aria-label={getString('player_submit_sponsorblock_segment')}
                   onClick={() => {
                     setSubmitAtSeconds(usePlayerStore.getState().currentTime);
                     setSubmitDialogOpen(true);
@@ -722,9 +939,12 @@ export const FlowPlayerControls: React.FC<FlowPlayerControlsProps> = ({
                   <SponsorBlockIcon className="h-[18px] w-[18px]" />
                 </button>
               )}
+              {showAutoplay && <AutoplaySwitch />}
+              {showQuality && (
               <button
                 type="button"
-                title="Quality"
+                {...{ [PLAYER_MENU_OWNER_ATTR]: "" }}
+                title={getString("player_menu_quality")}
                 onClick={() => {
                   if (settingsOpen && settingsPane === "quality") {
                     setSettingsOpen(false);
@@ -736,13 +956,15 @@ export const FlowPlayerControls: React.FC<FlowPlayerControlsProps> = ({
                 }}
                 className="hidden h-7 items-center rounded-full px-2 text-xs font-bold text-chrome-white hover:bg-chrome-white/10 sm:flex"
               >
-                {selectedQualityId === "auto"
-                  ? `Auto${activeQualityLabel ? ` (${activeQualityLabel})` : ""}`
-                  : (supportedQualities.find(q => q.id === selectedQualityId)?.qualityLabel || "Auto")}
+                {qualityLabel(selectedQualityId || "auto", supportedQualities, activeQualityLabel)}
               </button>
+              )}
+              {showCaptions && (
               <button
                 type="button"
-                title="Captions"
+                {...{ [PLAYER_MENU_OWNER_ATTR]: "" }}
+                title={getString("player_menu_captions")}
+                aria-label={getString("player_menu_captions")}
                 onClick={() => {
                   if (settingsOpen && settingsPane === "captions") {
                     setSettingsOpen(false);
@@ -759,9 +981,13 @@ export const FlowPlayerControls: React.FC<FlowPlayerControlsProps> = ({
               >
                 <Captions size={19} />
               </button>
+              )}
               <button
                 type="button"
-                title="Settings"
+                {...{ [PLAYER_MENU_OWNER_ATTR]: "" }}
+                title={getString("player_menu_settings")}
+                aria-label={getString("player_menu_settings")}
+                aria-expanded={settingsOpen}
                 onClick={() => {
                   setSettingsOpen((value) => !value);
                   setSettingsPane("root");
@@ -777,10 +1003,13 @@ export const FlowPlayerControls: React.FC<FlowPlayerControlsProps> = ({
                   }
                 />
               </button>
+              {showPlayOn && (
+                <PlayOnButton className="grid h-7 w-7 place-items-center rounded-full hover:bg-chrome-white/10" iconSize={19} />
+              )}
               {showPipButton && (
                 <button
                   type="button"
-                  title="Picture in picture"
+                  title={getString('player_picture_in_picture')}
                   onClick={togglePictureInPicture}
                   className={cx(
                     "hidden h-7 w-7 place-items-center rounded-full hover:bg-chrome-white/10 sm:grid",
@@ -790,10 +1019,10 @@ export const FlowPlayerControls: React.FC<FlowPlayerControlsProps> = ({
                   <PictureInPicture2 size={19} />
                 </button>
               )}
-              {!isFullscreen && (
+              {!isFullscreen && showTheater && (
                 <button
                   type="button"
-                  title="Theater mode"
+                  title={getString('player_theater_mode')}
                   onClick={() => setIsTheaterMode(!isTheaterMode)}
                   className={cx(
                     "grid h-7 w-7 place-items-center rounded-full hover:bg-chrome-white/10",
@@ -803,313 +1032,43 @@ export const FlowPlayerControls: React.FC<FlowPlayerControlsProps> = ({
                   {isTheaterMode ? <Shrink size={19} /> : <Expand size={19} />}
                 </button>
               )}
-              <button
-                type="button"
-                title="Fullscreen"
-                onClick={toggleFullscreen}
-                className="grid h-7 w-7 place-items-center rounded-full hover:bg-chrome-white/10"
-              >
-                {isFullscreen ? <Minimize2 size={19} /> : <Maximize2 size={19} />}
-              </button>
+              {showFullscreen && (
+                <button
+                  type="button"
+                  title={getString('player_fullscreen')}
+                  onClick={toggleFullscreen}
+                  className="grid h-7 w-7 place-items-center rounded-full hover:bg-chrome-white/10"
+                >
+                  {isFullscreen ? <Minimize2 size={19} /> : <Maximize2 size={19} />}
+                </button>
+              )}
             </div>
           </div>
         </div>
       </div>
 
-      <div
-        className={cx(
-          "absolute bottom-20 right-3 z-40 w-[min(92vw,360px)] overflow-hidden rounded-xl border border-chrome-white/10 bg-chrome-popover/95 p-2 text-chrome-white shadow-2xl transition-all duration-300 ease-[cubic-bezier(0.34,1.56,0.64,1)] transform sm:right-5",
-          settingsOpen
-            ? "opacity-100 translate-y-0 scale-100 pointer-events-auto"
-            : "opacity-0 translate-y-4 scale-95 pointer-events-none"
-        )}
-      >
-        {settingsPane !== "root" && (
-          <div className="mb-1 flex items-center justify-between px-1">
-            <button
-              type="button"
-              onClick={() => {
-                if (settingsPane === "captions-customize") {
-                  setSettingsPane("captions");
-                } else {
-                  setSettingsPane("root");
-                }
-              }}
-              className="flex h-10 min-w-0 flex-1 items-center gap-2 rounded-md pl-2 pr-3 text-sm font-bold hover:bg-chrome-white/10 text-left"
-            >
-              <ChevronLeft size={18} />
-              {settingsPane === "speed"
-                ? "Playback speed"
-                : settingsPane === "quality"
-                ? "Quality"
-                : settingsPane === "captions"
-                ? "Subtitles/CC"
-                : settingsPane === "captions-customize"
-                ? "Subtitle Style"
-                : settingsPane === "audio"
-                ? "Audio track"
-                : "Sleep timer"}
-            </button>
-            {settingsPane === "captions" && (
-              <button
-                type="button"
-                title="Customize Subtitles"
-                onClick={() => setSettingsPane("captions-customize")}
-                className="grid h-8 w-8 place-items-center rounded-md text-chrome-zinc-300 hover:bg-chrome-white/10 hover:text-chrome-white"
-              >
-                <Sliders size={17} />
-              </button>
-            )}
-          </div>
-        )}
-
-        {settingsPane === "root" && (
-          <div className="space-y-1 animate-pane-in">
-            {renderSettingRow(
-              "Playback speed",
-              playbackRate === 1 ? "Normal" : `${playbackRate}x`,
-              <Gauge size={18} />,
-              () => setSettingsPane("speed")
-            )}
-            {renderSettingRow(
-              "Quality",
-              selectedQualityId === "auto"
-                ? `Auto${activeQualityLabel ? ` (${activeQualityLabel})` : ""}`
-                : (supportedQualities.find(q => q.id === selectedQualityId)?.qualityLabel || "Auto"),
-              <Monitor size={18} />,
-              () => setSettingsPane("quality")
-            )}
-            {renderSettingRow(
-              "Subtitles/CC",
-              selectedCaption ? selectedCaption.label : "Off",
-              <Captions size={18} />,
-              () => setSettingsPane("captions")
-            )}
-            {renderSettingRow(
-              "Subtitle Style",
-              "Customize",
-              <Sliders size={18} />,
-              () => setSettingsPane("captions-customize")
-            )}
-            {renderSettingRow(
-              "Audio track",
-              selectedAudioTrack?.label || "Original",
-              <AudioLines size={18} />,
-              () => setSettingsPane("audio")
-            )}
-            {renderSettingRow(
-              "Sleep timer",
-              sleepMinutes ? `${sleepMinutes} min` : "Off",
-              <Pause size={18} />,
-              () => setSettingsPane("sleep")
-            )}
-          </div>
-        )}
-
-        {settingsPane === "speed" && (
-          <div className="space-y-1 animate-pane-in max-h-60 overflow-y-auto pr-1 select-scrollbar-hidden">
-            {speedSliderEnabled && (
-              <div className="rounded-md px-3 py-3 text-sm text-chrome-zinc-100">
-                <div className="mb-2 flex items-center justify-between text-xs font-semibold text-chrome-zinc-300">
-                  <span>Speed</span>
-                  <span className="font-mono text-primary">{playbackRate}x</span>
-                </div>
-                <input
-                  aria-label="Playback speed"
-                  type="range"
-                  min={0.25}
-                  max={4}
-                  step={0.05}
-                  value={playbackRate}
-                  onChange={(event) => selectPlaybackRate(Number(event.target.value))}
-                  className="h-1 w-full accent-primary"
-                />
-              </div>
-            )}
-            {speedOptions.map((speed) => (
-              <button
-                key={speed}
-                type="button"
-                onClick={() => {
-                  selectPlaybackRate(speed);
-                  setSettingsPane("root");
-                }}
-                className="flex h-10 w-full items-center justify-between rounded-md px-3 text-sm font-medium hover:bg-chrome-white/10"
-              >
-                <span>{speed === 1 ? "Normal" : `${speed}x`}</span>
-                {playbackRate === speed && <Check size={17} />}
-              </button>
-            ))}
-          </div>
-        )}
-
-        {settingsPane === "quality" && (
-          <div className="space-y-1 animate-pane-in max-h-60 overflow-y-auto pr-1 select-scrollbar-hidden">
-            <button
-              type="button"
-              onClick={() => {
-                onSelectQuality?.("auto");
-                setSettingsPane("root");
-                setSettingsOpen(false);
-              }}
-              className="flex h-10 w-full items-center justify-between rounded-md px-3 text-sm font-medium hover:bg-chrome-white/10 text-chrome-zinc-100"
-            >
-              <span className="flex items-center gap-1.5">
-                <span>Auto</span>
-                {selectedQualityId === "auto" && activeQualityLabel && (
-                  <span className="text-xs text-chrome-zinc-400 font-normal">
-                    ({activeQualityLabel})
-                  </span>
-                )}
-              </span>
-              {selectedQualityId === "auto" && <Check size={17} />}
-            </button>
-
-            {supportedQualities.map((quality) => {
-              const codec = videoCodecLabel(quality.mimeType);
-              return (
-                <button
-                  key={quality.id}
-                  type="button"
-                  onClick={() => {
-                    if (
-                      !isDashPlayback &&
-                      !quality.hasAudio &&
-                      !audioTracks.some((track) => !!track.localUrl)
-                    ) {
-                      return;
-                    }
-                    onSelectQuality?.(quality);
-                    setSettingsPane("root");
-                    setSettingsOpen(false);
-                  }}
-                  className={cx(
-                    "flex min-h-10 w-full items-center justify-between gap-3 rounded-md px-3 py-2 text-sm font-medium text-chrome-zinc-100",
-                    isDashPlayback ||
-                      quality.hasAudio ||
-                      audioTracks.some((track) => !!track.localUrl)
-                      ? "hover:bg-chrome-white/10"
-                      : "cursor-not-allowed text-chrome-zinc-500"
-                  )}
-                >
-                  <span className="flex flex-col text-left leading-tight">
-                    <span>{quality.qualityLabel}</span>
-                    {codec && (
-                      <span className="text-xs font-normal text-chrome-zinc-400">{codec}</span>
-                    )}
-                  </span>
-                  {selectedQualityId === quality.id && <Check size={17} />}
-                </button>
-              );
-            })}
-          </div>
-        )}
-
-        {settingsPane === "captions" && (
-          <div className="space-y-1 animate-pane-in max-h-60 overflow-y-auto pr-1 select-scrollbar-hidden">
-            <button
-              type="button"
-              onClick={() => {
-                setSelectedCaptionId("off");
-                setSettingsPane("root");
-              }}
-              className="flex h-10 w-full items-center justify-between rounded-md px-3 text-sm font-medium hover:bg-chrome-white/10"
-            >
-              <span>Off</span>
-              {selectedCaptionId === "off" && <Check size={17} />}
-            </button>
-            {captions.map((caption) => (
-              <button
-                key={caption.id}
-                type="button"
-                onClick={() => {
-                  setSelectedCaptionId(caption.id);
-                  setSettingsPane("root");
-                }}
-                className="flex min-h-10 w-full items-center justify-between gap-3 rounded-md px-3 py-2 text-sm font-medium hover:bg-chrome-white/10"
-              >
-                <span className="text-left">
-                  {caption.label}
-                  {caption.isAutoGenerated && (
-                    <span className="ml-1 text-xs text-chrome-zinc-400">auto</span>
-                  )}
-                </span>
-                {selectedCaptionId === caption.id && <Check size={17} />}
-              </button>
-            ))}
-          </div>
-        )}
-
-        {settingsPane === "captions-customize" && (
-          <div className="animate-pane-in max-h-64 overflow-y-auto pr-1 select-scrollbar-hidden">
-            <SubtitleCustomizer />
-          </div>
-        )}
-
-        {settingsPane === "audio" && (
-          <div className="space-y-1 animate-pane-in max-h-60 overflow-y-auto pr-1 select-scrollbar-hidden">
-            {audioTracks.length === 0 ? (
-              <div className="px-3 py-4 text-sm text-chrome-zinc-400">
-                Original audio
-              </div>
-            ) : (
-              audioTracks.map((track) => {
-                const unavailable = track.available === false;
-                return (
-                  <button
-                    key={track.id}
-                    type="button"
-                    disabled={unavailable}
-                    title={unavailable ? "This audio track isn't available for this video" : undefined}
-                    onClick={() => {
-                      if (unavailable) return;
-                      setSelectedAudioTrackId(track.id);
-                      setSettingsPane("root");
-                    }}
-                    className={`flex min-h-10 w-full items-center justify-between gap-3 rounded-md px-3 py-2 text-sm font-medium ${
-                      unavailable ? "cursor-not-allowed opacity-40" : "hover:bg-chrome-white/10"
-                    }`}
-                  >
-                    <span className="text-left">
-                      {track.label}
-                      {track.languageCode && (
-                        <span className="ml-1 text-xs text-chrome-zinc-400">
-                          {track.languageCode}
-                        </span>
-                      )}
-                    </span>
-                    {unavailable ? (
-                      <span className="text-xs text-chrome-zinc-500">Unavailable</span>
-                    ) : (
-                      (selectedAudioTrackId === track.id ||
-                        (!selectedAudioTrackId && track.isDefault)) && <Check size={17} />
-                    )}
-                  </button>
-                );
-              })
-            )}
-          </div>
-        )}
-
-        {settingsPane === "sleep" && (
-          <div className="space-y-1 animate-pane-in max-h-60 overflow-y-auto pr-1 select-scrollbar-hidden">
-            {sleepOptions.map((option) => (
-              <button
-                key={option.minutes}
-                type="button"
-                onClick={() => {
-                  setSleepMinutes(option.minutes);
-                  setSettingsPane("root");
-                }}
-                className="flex h-10 w-full items-center justify-between rounded-md px-3 text-sm font-medium hover:bg-chrome-white/10"
-              >
-                <span>{option.label}</span>
-                {sleepMinutes === option.minutes && <Check size={17} />}
-              </button>
-            ))}
-          </div>
-        )}
-      </div>
+      <PlayerSettingsMenu
+        open={settingsOpen}
+        pane={settingsPane}
+        onPaneChange={setSettingsPane}
+        onClose={() => setSettingsOpen(false)}
+        qualities={supportedQualities}
+        selectedQualityId={selectedQualityId || "auto"}
+        activeQualityLabel={activeQualityLabel}
+        isDashPlayback={isDashPlayback}
+        onSelectQuality={onSelectQuality}
+        captions={captions}
+        selectedCaptionId={selectedCaptionId}
+        setSelectedCaptionId={setSelectedCaptionId}
+        audioTracks={audioTracks}
+        selectedAudioTrackId={selectedAudioTrackId}
+        setSelectedAudioTrackId={setSelectedAudioTrackId}
+        speedOptions={speedOptions}
+        speedSliderEnabled={speedSliderEnabled}
+        playbackRate={playbackRate}
+        onSelectPlaybackRate={selectPlaybackRate}
+        spherical={spherical}
+      />
 
       {submitDialogOpen && currentVideo && (
         <SponsorBlockSubmitDialog

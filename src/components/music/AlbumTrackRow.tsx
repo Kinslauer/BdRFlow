@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Disc3, Heart, ListPlus, MoreVertical, Music2, Play, Share2, Trash2, Volume2 } from 'lucide-react';
+import { Check, Disc3, Heart, ListPlus, MoreVertical, Music2, Play, Share2, Trash2, Volume2 } from 'lucide-react';
 
 import { getString } from '../../lib/i18n/index';
 import { artistsText, formatTime } from '../../lib/musicFormat';
@@ -13,13 +13,17 @@ import { shareLink } from '../../lib/clipboard';
 import { useMusicPlayerStore } from '../../store/useMusicPlayerStore';
 import { useAlbumLibraryStore } from '../../store/useAlbumLibraryStore';
 import { useLikesStore } from '../../store/useLikesStore';
-import { useUiStore } from '../../store/useUiStore';
+import { toggleSongLikeWithToast } from '../../lib/songLikeToast';
 import type { SongItem } from '../../types/music';
 import { MusicCardMenu, type MusicMenuAction, useMusicContextMenu } from './MusicCardMenu';
+import { ArtistLinks } from './ArtistLinks';
 import { ExplicitBadge } from './ExplicitBadge';
+import { SuspectedAiTag } from './SuspectedAiTag';
+import { useAiMusicVerdict } from '../../lib/aiList/useAiList';
 import { PlayingWave } from './PlayingWave';
 import { useTrackBlockActions } from './useTrackBlockActions';
 import { useTrackNavActions } from './useTrackNavActions';
+import { useTrackDetailsAction } from './useTrackDetailsAction';
 import { useTrackDownloadAction } from './useTrackDownloadAction';
 import { useTrackRadioAction } from './useTrackRadioAction';
 
@@ -41,6 +45,8 @@ interface AlbumTrackRowProps {
   onAddToQueue: (track: SongItem) => void;
   onLike?: (track: SongItem) => void;
   onRemove?: (track: SongItem) => void;
+  /** Set while songs are being picked: a click then picks this one instead of playing it. */
+  selection?: { selected: boolean; onToggle: (track: SongItem, extendRange: boolean) => void };
 }
 
 function videoIdOf(track: SongItem): string {
@@ -51,8 +57,6 @@ function useSongLike(track: SongItem) {
   const likedItems = useLikesStore((s) => s.items);
   const loaded = useLikesStore((s) => s.loaded);
   const load = useLikesStore((s) => s.load);
-  const toggleSong = useLikesStore((s) => s.toggleSong);
-  const showToast = useUiStore((s) => s.showToast);
   const trackId = videoIdOf(track);
 
   useEffect(() => {
@@ -61,18 +65,7 @@ function useSongLike(track: SongItem) {
 
   const liked = likedItems.some((item) => item.kind === 'music' && item.id === trackId);
 
-  const toggle = async () => {
-    try {
-      const nowLiked = await toggleSong(track);
-      showToast({
-        variant: 'success',
-        message: getString(nowLiked ? 'liked_added_toast' : 'liked_removed_toast'),
-      });
-    } catch (error) {
-      console.warn('Failed to update song like', error);
-      showToast({ variant: 'error', message: getString('liked_update_failed') });
-    }
-  };
+  const toggle = () => toggleSongLikeWithToast(track, liked);
 
   return { liked, toggle };
 }
@@ -126,8 +119,10 @@ export function AlbumTrackRow({
   onAddToQueue,
   onLike,
   onRemove,
+  selection,
 }: AlbumTrackRowProps) {
   const artistLabel = artistsText(track.artists);
+  const suspectedAi = useAiMusicVerdict(track.artists.map((artist) => artist.id)) === 'warn';
   const duration = track.duration == null ? '' : formatTime(track.duration);
   const showEq = isCurrent && isPlaying;
   const [isHovered, setIsHovered] = useState(false);
@@ -142,47 +137,57 @@ export function AlbumTrackRow({
   const radioActions = useTrackRadioAction(track);
   const downloadActions = useTrackDownloadAction(track);
   const blockActions = useTrackBlockActions(track);
+  const detailsActions = useTrackDetailsAction(track);
   const openAddToAlbum = useAlbumLibraryStore((s) => s.openAddToAlbum);
   const isHighlighted = isHovered || showEq;
   const activeColor = dominantColor ?? preloadedColor;
   const menuActions: MusicMenuAction[] = [
-    ...radioActions,
-    {
-      id: 'add-to-queue',
-      label: getString('music_add_to_queue'),
-      icon: <ListPlus size={16} />,
-      onSelect: () => onAddToQueue(track),
-    },
     {
       id: 'play-next',
       label: getString('music_play_next'),
+      tileLabel: getString('menu_tile_play_next'),
       icon: <Play size={16} />,
+      group: 'quick',
       onSelect: () => playNextInQueue(track),
     },
-    ...navActions,
+    {
+      id: 'add-to-queue',
+      label: getString('music_add_to_queue'),
+      tileLabel: getString('menu_tile_queue'),
+      icon: <ListPlus size={16} />,
+      group: 'quick',
+      onSelect: () => onAddToQueue(track),
+    },
+    ...radioActions,
+    ...downloadActions,
     {
       id: 'add-to-album',
       label: getString('music_add_to_album'),
       icon: <Disc3 size={16} />,
+      group: 'library',
       onSelect: () => openAddToAlbum(track),
     },
-    ...downloadActions,
     {
       id: 'share',
       label: getString('music_share'),
       icon: <Share2 size={16} />,
+      group: 'library',
       onSelect: () => void shareLink(track.title, youtubeMusicWatchUrl(videoIdOf(track))),
     },
+    ...detailsActions,
     ...(onRemove
       ? ([
           {
             id: 'remove-from-album',
             label: getString('album_remove_track'),
             icon: <Trash2 size={16} />,
+            group: 'library',
+            danger: true,
             onSelect: () => onRemove(track),
           },
         ] as MusicMenuAction[])
       : []),
+    ...navActions,
     ...blockActions,
   ];
   const resolveColor = (img?: HTMLImageElement) => {
@@ -212,10 +217,11 @@ export function AlbumTrackRow({
   return (
     <div
       ref={menu.cardRef}
-      role="button"
+      role={selection ? 'checkbox' : 'button'}
+      aria-checked={selection ? selection.selected : undefined}
       tabIndex={0}
-      onClick={() => onPlay(track)}
-      onContextMenu={menu.openMenuFromContext}
+      onClick={(event) => (selection ? selection.onToggle(track, event.shiftKey) : onPlay(track))}
+      onContextMenu={selection ? undefined : menu.openMenuFromContext}
       onMouseEnter={() => {
         setIsHovered(true);
         resolveColor();
@@ -224,16 +230,26 @@ export function AlbumTrackRow({
       onKeyDown={(event) => {
         if (event.key === 'Enter' || event.key === ' ') {
           event.preventDefault();
-          onPlay(track);
+          if (selection) selection.onToggle(track, event.shiftKey);
+          else onPlay(track);
         }
       }}
-      className={`group flex cursor-pointer items-center rounded-lg px-4 py-2 transition-colors duration-200 ease-out ${
-        isCurrent ? 'bg-surface-container-low' : ''
+      className={`group flex cursor-pointer items-center rounded-lg px-4 py-2 transition-colors duration-200 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary ${
+        isCurrent || selection?.selected ? 'bg-surface-container-low' : ''
       } ${COLOR_WASH_HOST}`}
     >
       <ColorWash active={isHighlighted} color={activeColor} radius="rounded-lg" spread="row" />
       <div className="relative grid w-12 shrink-0 place-items-center">
-        {showEq ? (
+        {selection ? (
+          <span
+            className={cx(
+              'grid h-5 w-5 place-items-center rounded border transition-colors duration-200 ease-out',
+              selection.selected ? 'border-primary bg-primary text-on-primary' : 'border-chrome-neutral-700 bg-surface-container',
+            )}
+          >
+            {selection.selected ? <Check className="h-3.5 w-3.5" /> : null}
+          </span>
+        ) : showEq ? (
           <PlayingWave className="text-[var(--color-primary)]" />
         ) : isCurrent ? (
           <Volume2 className="h-4 w-4 text-[var(--color-primary)]" />
@@ -251,7 +267,7 @@ export function AlbumTrackRow({
       </div>
 
       {showArtwork ? (
-        <div className="mr-3 shrink-0">
+        <div className="me-3 shrink-0">
           <TrackArtwork
             track={track}
             imageRef={artworkRef}
@@ -263,35 +279,38 @@ export function AlbumTrackRow({
       ) : null}
 
       <div className="flex min-w-0 flex-1 flex-col">
-        <span className={`line-clamp-1 font-medium ${isCurrent ? 'text-[var(--color-primary)]' : 'text-chrome-neutral-100'}`}>
+        <span dir="auto" className={`line-clamp-1 font-medium ${isCurrent ? 'text-[var(--color-primary)]' : 'text-chrome-neutral-100'}`}>
           {track.title}
         </span>
-        {((showArtist && artistLabel) || track.explicit) && (
+        {((showArtist && artistLabel) || track.explicit || suspectedAi) && (
           <span className="mt-0.5 flex min-w-0 items-center gap-1.5 text-sm text-chrome-neutral-400 transition-colors duration-200 ease-out group-hover:text-chrome-neutral-300">
             {track.explicit ? <ExplicitBadge /> : null}
-            {showArtist && artistLabel ? <span className="line-clamp-1">{artistLabel}</span> : null}
+            {suspectedAi ? <SuspectedAiTag /> : null}
+            {showArtist && artistLabel ? (
+              <ArtistLinks artists={track.artists} plain={Boolean(selection)} className="line-clamp-1" />
+            ) : null}
           </span>
         )}
       </div>
 
       {showStreamsColumn ? (
-        <span className="hidden w-32 shrink-0 text-right font-mono text-sm tabular-nums text-chrome-neutral-500 lg:block">
+        <span className="hidden w-32 shrink-0 text-end font-mono text-sm tabular-nums text-chrome-neutral-500 lg:block">
           {streamsText ?? ''}
         </span>
       ) : null}
 
-      <div className="relative ml-4 h-8 w-20 shrink-0">
+      <div className="relative ms-4 h-8 w-20 shrink-0">
         <span
           className={cx(
-            'absolute right-0 top-1/2 -translate-y-1/2 font-mono text-sm tabular-nums text-chrome-neutral-400 transition-opacity duration-200 ease-out',
-            compactActions ? 'xl:group-hover:opacity-0' : 'group-hover:opacity-0',
+            'absolute end-0 top-1/2 -translate-y-1/2 font-mono text-sm tabular-nums text-chrome-neutral-400 transition-opacity duration-200 ease-out',
+            selection ? null : compactActions ? 'xl:group-hover:opacity-0' : 'group-hover:opacity-0',
           )}
         >
           {duration}
         </span>
-        <div
+        {selection ? null : <div
           className={cx(
-            'absolute right-0 top-0 flex items-center gap-1 opacity-0 transition-opacity duration-200 ease-out group-hover:opacity-100',
+            'absolute end-0 top-0 flex items-center gap-1 opacity-0 transition-opacity duration-200 ease-out group-hover:opacity-100',
             compactActions ? 'hidden xl:flex' : null,
           )}
         >
@@ -321,7 +340,7 @@ export function AlbumTrackRow({
               <MoreVertical className="h-4 w-4" />
             </button>
           </div>
-        </div>
+        </div>}
       </div>
       <MusicCardMenu
         actions={menuActions}

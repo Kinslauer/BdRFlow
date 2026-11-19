@@ -1,17 +1,26 @@
 import type {
+  SearchSuggestion,
   SearchVideosRequest,
   SearchVideosResponse,
+  StoryboardLevel,
   VideoDetails,
+  VideoMetadata,
   StreamInfo,
+  ChannelAbout,
   ChannelDetails,
+  ChannelPage,
   ChannelTabResponse,
   ChannelItem,
   PlaylistDetailsResponse,
   CommentsResponse,
   LiveChatResponse,
   VideoSummary,
-  RelatedContentItem,
-  PlaylistSummary,
+  RelatedPage,
+  ExploreDestinationId,
+  ExploreGrid,
+  ExplorePage,
+  ExploreTarget,
+  PostSummary,
 } from "../../types/video";
 import { isTauriEnv } from "./env";
 import {
@@ -21,8 +30,6 @@ import {
 } from "./errors";
 
 export { BackendApiError as YoutubeApiError };
-
-export type TrendingCategory = "all" | "trending" | "gaming" | "music" | "movies" | "live";
 
 export function getYoutubeErrorMessage(error: unknown): string {
   return getBackendErrorMessage(error);
@@ -79,6 +86,11 @@ export async function searchVideos(
   return invokeBackend<SearchVideosResponse>("search_videos", { request });
 }
 
+export async function getOriginalTitle(videoId: string): Promise<string | null> {
+  if (!(await isTauriEnv())) return null;
+  return invokeBackend<string | null>("get_original_title", { videoId });
+}
+
 export async function getVideoDetails(videoId: string): Promise<VideoDetails> {
   if (!(await isTauriEnv())) {
     console.warn("Tauri not detected. Returning mock video details.");
@@ -94,37 +106,62 @@ export async function getVideoDetails(videoId: string): Promise<VideoDetails> {
   return invokeBackend<VideoDetails>("get_video_details", { videoId });
 }
 
-export async function getRelatedVideos(videoId: string): Promise<RelatedContentItem[]> {
+export async function getRelatedVideos(videoId: string): Promise<RelatedPage> {
   if (!(await isTauriEnv())) {
     console.warn("Tauri not detected. Returning mock related content.");
-    return [
-      {
-        id: "dQw4w9WgXcQ",
-        itemType: "video",
-        title: "Mock Related Video",
-        channelName: "Mock Creator",
-        thumbnailUrl: "https://images.unsplash.com/photo-1607799279861-4dd421887fb3?q=80&w=300",
-        durationSeconds: 180,
-        publishedText: "3 months ago",
-        viewCountText: "2M views",
-        videoId: "dQw4w9WgXcQ",
-        playlistId: null,
-        isMix: false,
-      },
-      {
-        id: "RDAMVMdQw4w9WgXcQ",
-        itemType: "mix",
-        title: "Mock Coding Mix",
-        channelName: "YouTube Mix",
-        thumbnailUrl: "https://images.unsplash.com/photo-1516321318423-f06f85e504b3?q=80&w=300",
-        viewCountText: "Mix",
-        videoId: "dQw4w9WgXcQ",
-        playlistId: "RDAMVMdQw4w9WgXcQ",
-        isMix: true,
-      },
-    ];
+    return {
+      items: [
+        {
+          id: "dQw4w9WgXcQ",
+          itemType: "video",
+          title: "Mock Related Video",
+          channelName: "Mock Creator",
+          thumbnailUrl: "https://images.unsplash.com/photo-1607799279861-4dd421887fb3?q=80&w=300",
+          durationSeconds: 180,
+          publishedText: "3 months ago",
+          viewCountText: "2M views",
+          videoId: "dQw4w9WgXcQ",
+          playlistId: null,
+          isMix: false,
+        },
+      ],
+      continuation: null,
+    };
   }
-  return invokeBackend<RelatedContentItem[]>("get_related_videos", { videoId });
+  return invokeBackend<RelatedPage>("get_related_videos", { videoId });
+}
+
+export async function getMoreRelatedVideos(continuation: string): Promise<RelatedPage> {
+  if (!(await isTauriEnv())) return { items: [], continuation: null };
+  return invokeBackend<RelatedPage>("get_more_related_videos", { continuation });
+}
+
+/** A listed video's length, views, upload date and category, from one small request. */
+export async function getVideoMetadata(videoId: string): Promise<VideoMetadata> {
+  if (!(await isTauriEnv())) throw new Error("Video metadata requires the desktop app.");
+  return invokeBackend<VideoMetadata>("get_video_metadata", { videoId });
+}
+
+/** The video's category, from a small request of its own. */
+export interface PaidPromotionLabel {
+  text: string | null;
+  durationMs: number;
+}
+
+export async function getPaidPromotion(videoId: string): Promise<PaidPromotionLabel | null> {
+  if (!(await isTauriEnv())) return null;
+  return invokeBackend<PaidPromotionLabel | null>("get_paid_promotion", { videoId });
+}
+
+export async function getVideoCategory(videoId: string): Promise<string | null> {
+  if (!(await isTauriEnv())) return null;
+  return invokeBackend<string | null>("get_video_category", { videoId });
+}
+
+/** Storyboard specification for hover previews and seek thumbnails. */
+export async function getVideoStoryboard(videoId: string): Promise<StoryboardLevel[]> {
+  if (!(await isTauriEnv())) return [];
+  return invokeBackend<StoryboardLevel[]>("get_video_storyboard", { videoId });
 }
 
 export async function getStreamInfo(videoId: string, refresh = false): Promise<StreamInfo> {
@@ -209,9 +246,30 @@ export async function getChannelDetails(channelId: string): Promise<ChannelDetai
       subscriberCount: 154000,
       subscriberCountText: "154K subscribers",
       verified: true,
+      tabs: [
+        { kind: "home", title: "Home", selected: true },
+        { kind: "videos", title: "Videos", params: "videos", selected: false },
+      ],
     };
   }
   return invokeBackend<ChannelDetails>("get_channel_details", { channelId });
+}
+
+/** A channel's header, tabs and Home shelves, from one request. */
+export async function getChannelPage(channelId: string): Promise<ChannelPage> {
+  if (!(await isTauriEnv())) {
+    const [details, home] = await Promise.all([getChannelDetails(channelId), getChannelTab(channelId)]);
+    return { details, home };
+  }
+  return invokeBackend<ChannelPage>("get_channel_page", { channelId });
+}
+
+/** A channel's About panel, by the token its header carries. */
+export async function getChannelAbout(token: string): Promise<ChannelAbout> {
+  if (!(await isTauriEnv())) {
+    throw new Error("The About panel requires the desktop app.");
+  }
+  return invokeBackend<ChannelAbout>("get_channel_about", { token });
 }
 
 /** Resolve a channel URL (handle / custom / user) to its canonical `UC…` id. */
@@ -285,6 +343,8 @@ export async function getChannelTab(
       channelId,
       items: mockItems,
       nextPageToken: null,
+      sections: [],
+      filters: [],
     };
   }
   return invokeBackend<ChannelTabResponse>("get_channel_tab", {
@@ -326,6 +386,12 @@ export async function getPlaylistDetails(
     playlistId,
     pageToken,
   });
+}
+
+/** A Mix's queue as a playlist. `videoId` seeds a Mix whose id names no video. */
+export async function getMixPlaylist(playlistId: string, videoId?: string | null): Promise<PlaylistDetailsResponse> {
+  if (!(await isTauriEnv())) throw new Error("Mixes require the desktop app.");
+  return invokeBackend<PlaylistDetailsResponse>("get_mix_playlist", { playlistId, videoId: videoId ?? null });
 }
 
 export async function getComments(
@@ -385,82 +451,52 @@ export async function getPostComments(
   });
 }
 
+/** A page of the video's chat. `replayOffsetMs` reads a replay at that point of the stream. */
 export async function getLiveChat(
   videoId: string,
   continuation?: string | null,
+  replayOffsetMs?: number | null,
 ): Promise<LiveChatResponse> {
   if (!(await isTauriEnv())) {
     console.warn("Tauri not detected. Returning mock live chat.");
     return { messages: [], continuation: null, pollingIntervalMs: 0, isReplay: false };
   }
-  return invokeBackend<LiveChatResponse>("get_live_chat", { videoId, continuation });
+  return invokeBackend<LiveChatResponse>("get_live_chat", {
+    videoId,
+    continuation,
+    replayOffsetMs: replayOffsetMs == null ? null : Math.max(0, Math.round(replayOffsetMs)),
+  });
 }
 
-export async function getTrendingByCategory(
-  category: TrendingCategory,
+/** One of Explore's destinations in `region`. */
+export async function getExploreDestination(destination: ExploreDestinationId, region: string): Promise<ExplorePage> {
+  if (!(await isTauriEnv())) return { title: null, tabs: [], shelves: [] };
+  return invokeBackend<ExplorePage>("get_explore_destination", { destination, region });
+}
+
+/** A destination's tab, by the target its page named. */
+export async function getExplorePage(target: ExploreTarget, region: string): Promise<ExplorePage> {
+  if (!(await isTauriEnv())) return { title: null, tabs: [], shelves: [] };
+  return invokeBackend<ExplorePage>("get_explore_page", { target, region });
+}
+
+/** A shelf's full grid: the first page from its target, later pages from the token. */
+export async function getExploreGrid(
+  target: ExploreTarget | null,
+  continuation: string | null,
   region: string,
-): Promise<VideoSummary[]> {
-  if (!(await isTauriEnv())) {
-    console.warn("Tauri not detected. Returning mock category videos.");
-    return [
-      {
-        id: "dQw4w9WgXcQ",
-        title: `${category === "all" ? "All" : category} category offline preview`,
-        channelName: "Flow Preview",
-        thumbnailUrl: "https://images.unsplash.com/photo-1607799279861-4dd421887fb3?q=80&w=300",
-        durationSeconds: 156,
-        publishedText: "1 day ago",
-        viewCountText: "500K views",
-      },
-    ];
-  }
-  return invokeBackend<VideoSummary[]>("get_trending_videos", { category, region });
+): Promise<ExploreGrid> {
+  if (!(await isTauriEnv())) return { videos: [], continuation: null };
+  return invokeBackend<ExploreGrid>("get_explore_grid", { target, continuation, region });
 }
 
-export async function getSearchSuggestions(query: string): Promise<string[]> {
+/** Suggestions for `query`; `region` is the viewer's two-letter country code. */
+export async function getSearchSuggestions(query: string, region?: string | null): Promise<SearchSuggestion[]> {
   if (!(await isTauriEnv())) {
     console.warn("Tauri not detected. Returning mock suggestions.");
-    return [
-      `${query} tutorial`,
-      `${query} crash course`,
-      `${query} setup guide`,
-      `${query} tips & tricks`,
-    ];
+    return ["tutorial", "crash course", "setup guide"].map((tail) => ({ text: `${query} ${tail}`, entity: null }));
   }
-  return invokeBackend<string[]>("get_search_suggestions", { query });
-}
-
-export async function searchMusic(
-  query: string,
-  filter: string,
-): Promise<Array<VideoSummary | PlaylistSummary>> {
-  if (!(await isTauriEnv())) {
-    console.warn("Tauri not detected. Returning mock music search results.");
-    if (filter === "playlists") {
-      return [
-        {
-          type: "playlist",
-          id: "mock-search-playlist-1",
-          title: `${query} Playlist`,
-          thumbnailUrl: "https://images.unsplash.com/photo-1607799279861-4dd421887fb3?q=80&w=300",
-          videoCountText: "18 videos",
-        },
-      ];
-    }
-
-    return [
-      {
-        id: "dQw4w9WgXcQ",
-        title: `${query} (Lofi Remix)`,
-        channelName: "Mock Artist",
-        thumbnailUrl: "https://images.unsplash.com/photo-1607799279861-4dd421887fb3?q=80&w=300",
-        durationSeconds: 240,
-        publishedText: "Released 2026",
-        viewCountText: "Song",
-      },
-    ];
-  }
-  return invokeBackend<VideoSummary[]>("search_music", { query, filter });
+  return invokeBackend<SearchSuggestion[]>("get_search_suggestions", { query, region: region ?? null });
 }
 
 export async function parseSubscriptionExport(
@@ -476,85 +512,11 @@ export async function parseSubscriptionExport(
   return invokeBackend<[string, string][]>("parse_subscription_export", { data });
 }
 
-export async function getMusicLyrics(videoId: string): Promise<string | null> {
-  if (!(await isTauriEnv())) {
-    console.warn("Tauri not detected. Returning mock lyrics.");
-    return "[00:10.00] This is a mock lyrics line\n[00:20.00] Singing natively in Flow Desktop!";
-  }
-  return invokeBackend<string | null>("get_music_lyrics", { videoId });
+/** Videos refused for good (members-only, private, blocked here...) when they were opened. */
+export async function getUnplayableVideoIds(): Promise<string[]> {
+  if (!(await isTauriEnv())) return [];
+  return invokeBackend<string[]>("get_unplayable_video_ids");
 }
-
-export async function getMusicRelated(videoId: string): Promise<VideoSummary[]> {
-  if (!(await isTauriEnv())) {
-    console.warn("Tauri not detected. Returning mock related songs.");
-    return [
-      {
-        id: "dQw4w9WgXcQ",
-        title: "Mock Related Hit",
-        channelName: "Mock Artist",
-        thumbnailUrl: "https://images.unsplash.com/photo-1607799279861-4dd421887fb3?q=80&w=300",
-        durationSeconds: 180,
-        publishedText: "3 months ago",
-        viewCountText: "2M views",
-      },
-    ];
-  }
-  return invokeBackend<VideoSummary[]>("get_music_related", { videoId });
-}
-
-export async function getMusicAlbum(albumBrowseId: string): Promise<VideoSummary[]> {
-  if (!(await isTauriEnv())) {
-    console.warn("Tauri not detected. Returning mock album tracks.");
-    return [
-      {
-        id: "dQw4w9WgXcQ",
-        title: "Mock Album Track 1",
-        channelName: "Mock Artist",
-        thumbnailUrl: "https://images.unsplash.com/photo-1607799279861-4dd421887fb3?q=80&w=300",
-        durationSeconds: 200,
-        publishedText: "Track 1",
-        viewCountText: "Album Track",
-      },
-    ];
-  }
-  return invokeBackend<VideoSummary[]>("get_music_album", { albumBrowseId });
-}
-
-
-
-export interface MusicHomeSection {
-  sectionId: string;
-  title: string;
-  subtitle: string | null;
-  tracks: VideoSummary[];
-  orderBy: number;
-}
-
-export interface MusicHomeChip {
-  title: string;
-  browseId: string | null;
-  params: string | null;
-  orderBy: number;
-}
-
-/** @deprecated Legacy cached Music Home. Unused — the Music tab uses `getMusicHomePage`. */
-export async function getMusicHome(): Promise<[MusicHomeSection[], MusicHomeChip[]]> {
-  if (!(await isTauriEnv())) {
-    console.warn("Tauri not detected. Returning mock Music Home.");
-    return [[], []];
-  }
-  return invokeBackend<[MusicHomeSection[], MusicHomeChip[]]>("get_music_home");
-}
-
-/** @deprecated Legacy cached Music Home. Unused — the Music tab uses `getMusicHomePage`. */
-export async function refreshMusicHome(): Promise<[MusicHomeSection[], MusicHomeChip[]]> {
-  if (!(await isTauriEnv())) {
-    console.warn("Tauri not detected. Returning mock Music Home.");
-    return [[], []];
-  }
-  return invokeBackend<[MusicHomeSection[], MusicHomeChip[]]>("refresh_music_home");
-}
-
 
 export async function getSubscriptionRotationFeed(): Promise<VideoSummary[]> {
   if (!(await isTauriEnv())) {
@@ -573,6 +535,8 @@ export interface SubscriptionRssChannel {
 export interface SubscriptionRssFeed {
   videos: VideoSummary[];
   channels: SubscriptionRssChannel[];
+  /** Channels whose uploads could be read neither from their feed nor their Videos tab. */
+  failedChannelIds: string[];
   processed: number;
   total: number;
 }
@@ -599,6 +563,7 @@ export async function getSubscriptionRssFeed(
         name: `Subscribed Channel ${index + 1}`,
         avatarUrl: null,
       })),
+      failedChannelIds: [],
       processed: channelIds.length,
       total: channelIds.length,
     };
@@ -617,6 +582,64 @@ export async function getSubscriptionRssFeed(
  * channel. `onBatch` fires once per emitted batch; the promise resolves when
  * the stream completes.
  */
+/** Collaborations of the followed channels; a few more channels are looked at on each call. */
+export async function scanSubscriptionCollaborations(channelIds: string[]): Promise<VideoSummary[]> {
+  if (!(await isTauriEnv())) return [];
+  return invokeBackend<VideoSummary[]>("scan_subscription_collaborations", { channelIds });
+}
+
+export interface SubscriptionPostsChannel {
+  id: string;
+  name?: string | null;
+  avatarUrl?: string | null;
+}
+
+/** A recent community post of a followed channel. */
+export interface SubscriptionPost {
+  post: PostSummary;
+  channelId: string;
+  /** Epoch ms, read from the post's relative age when it was fetched. */
+  publishedAt: number;
+}
+
+export interface SubscriptionPostsPage {
+  posts: SubscriptionPost[];
+  /** The page after this one, or null once every channel was read. */
+  nextPage: number | null;
+}
+
+type WirePostsPage = {
+  posts: Array<Omit<SubscriptionPost, "post"> & { post: Omit<PostSummary, "type"> }>;
+  nextPage?: number | null;
+};
+
+/**
+ * One page of the followed channels' recent posts: eight channels, ranked by `recentUploaderIds`
+ * (channel ids, newest upload first), so the same arguments always give the same page.
+ */
+export async function getSubscriptionPosts(
+  channels: SubscriptionPostsChannel[],
+  recentUploaderIds: string[],
+  page: number,
+): Promise<SubscriptionPostsPage> {
+  if (!(await isTauriEnv())) return { posts: [], nextPage: null };
+  const result = await invokeBackend<WirePostsPage>("get_subscription_posts", {
+    channels,
+    recentUploaderIds,
+    page,
+  });
+  return {
+    posts: result.posts.map((item) => ({ ...item, post: { ...item.post, type: "post" } })),
+    nextPage: result.nextPage ?? null,
+  };
+}
+
+/** Forgets every channel's cached posts, so the next page reads each channel again. */
+export async function forgetSubscriptionPosts(): Promise<void> {
+  if (!(await isTauriEnv())) return;
+  await invokeBackend<void>("forget_subscription_posts");
+}
+
 export async function streamSubscriptionRssFeed(
   channelIds: string[],
   onBatch: (feed: SubscriptionRssFeed) => void,

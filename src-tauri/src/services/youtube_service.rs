@@ -1,25 +1,28 @@
 use std::sync::Arc;
 
-use crate::api::extractor::YoutubeExtractor;
+use crate::api::innertube::InnertubeClient;
+use crate::api::innertube::extractors::resolve::ResolvedEndpoint;
 use crate::errors::AppResult;
-use crate::models::channel::{ChannelDetails, ChannelTabResponse};
+use crate::models::channel::{ChannelAbout, ChannelDetails, ChannelPage, ChannelTabResponse};
 use crate::models::comment::CommentsResponse;
+use crate::models::explore::{ExploreGrid, ExplorePage, ExploreTarget};
 use crate::models::live_chat::LiveChatResponse;
-use crate::models::music::{ArtistPage, ChartsPage, ExplorePage};
 use crate::models::playlist::PlaylistDetailsResponse;
-use crate::models::search::{SearchVideosRequest, SearchVideosResponse};
-use crate::models::shorts::ShortsFeed;
-use crate::models::video::{MusicHomeChip, MusicHomeSection, VideoSummary};
-use crate::models::video::{RelatedContentItem, StreamInfo, VideoBasics, VideoDetails};
+use crate::models::search::{SearchSuggestion, SearchVideosRequest, SearchVideosResponse};
+use crate::models::shorts::{ShortItem, ShortsFeed};
+use crate::models::video::{
+    PaidPromotionLabel, RelatedPage, StoryboardLevel, StreamInfo, VideoBasics, VideoDetails,
+    VideoMetadata,
+};
 
 #[derive(Clone)]
 pub struct YoutubeService {
-    extractor: Arc<dyn YoutubeExtractor>,
+    extractor: Arc<InnertubeClient>,
 }
 
 impl YoutubeService {
     #[must_use]
-    pub fn new(extractor: Arc<dyn YoutubeExtractor>) -> Self {
+    pub fn new(extractor: Arc<InnertubeClient>) -> Self {
         Self { extractor }
     }
 
@@ -38,12 +41,47 @@ impl YoutubeService {
         self.extractor.get_video_basics(video_id).await
     }
 
-    pub async fn get_related_videos(&self, video_id: &str) -> AppResult<Vec<RelatedContentItem>> {
+    pub async fn get_related_videos(&self, video_id: &str) -> AppResult<RelatedPage> {
         self.extractor.get_related_videos(video_id).await
+    }
+
+    pub async fn get_video_metadata(&self, video_id: &str) -> AppResult<VideoMetadata> {
+        self.extractor.get_video_metadata(video_id).await
+    }
+
+    pub async fn get_paid_promotion(
+        &self,
+        video_id: &str,
+    ) -> AppResult<Option<PaidPromotionLabel>> {
+        self.extractor.get_paid_promotion(video_id).await
+    }
+
+    pub async fn get_video_storyboard(&self, video_id: &str) -> AppResult<Vec<StoryboardLevel>> {
+        self.extractor.get_video_storyboard(video_id).await
+    }
+
+    pub async fn get_video_category(&self, video_id: &str) -> AppResult<Option<String>> {
+        self.extractor.get_video_category(video_id).await
+    }
+
+    pub async fn get_feed_related_videos(&self, video_id: &str) -> AppResult<RelatedPage> {
+        self.extractor.get_feed_related_videos(video_id).await
+    }
+
+    pub async fn get_more_related_videos(&self, continuation: &str) -> AppResult<RelatedPage> {
+        self.extractor.get_more_related_videos(continuation).await
     }
 
     pub async fn get_stream_info(&self, video_id: &str, refresh: bool) -> AppResult<StreamInfo> {
         self.extractor.get_stream_info(video_id, refresh).await
+    }
+
+    pub async fn get_channel_page(&self, channel_id: &str) -> AppResult<ChannelPage> {
+        self.extractor.get_channel_page(channel_id).await
+    }
+
+    pub async fn get_channel_about(&self, token: &str) -> AppResult<ChannelAbout> {
+        self.extractor.get_channel_about(token).await
     }
 
     pub async fn get_channel_details(&self, channel_id: &str) -> AppResult<ChannelDetails> {
@@ -72,6 +110,14 @@ impl YoutubeService {
             .await
     }
 
+    pub async fn get_mix_playlist(
+        &self,
+        playlist_id: &str,
+        video_id: Option<&str>,
+    ) -> AppResult<PlaylistDetailsResponse> {
+        self.extractor.get_mix_playlist(playlist_id, video_id).await
+    }
+
     pub async fn get_comments(
         &self,
         video_id: &str,
@@ -95,20 +141,60 @@ impl YoutubeService {
         &self,
         video_id: &str,
         continuation: Option<String>,
+        replay_offset_ms: Option<u64>,
     ) -> AppResult<LiveChatResponse> {
-        self.extractor.get_live_chat(video_id, continuation).await
+        self.extractor
+            .get_live_chat(video_id, continuation, replay_offset_ms)
+            .await
     }
 
-    pub async fn get_trending_videos(
+    pub async fn get_explore_destination(
         &self,
-        category: Option<&str>,
+        destination: &str,
         region: Option<&str>,
-    ) -> AppResult<Vec<VideoSummary>> {
-        self.extractor.get_trending_videos(category, region).await
+    ) -> AppResult<ExplorePage> {
+        self.extractor
+            .get_explore_destination(destination, region)
+            .await
     }
 
-    pub async fn get_search_suggestions(&self, query: &str) -> AppResult<Vec<String>> {
-        self.extractor.get_search_suggestions(query).await
+    pub async fn get_explore_page(
+        &self,
+        browse_id: &str,
+        params: Option<&str>,
+        region: Option<&str>,
+    ) -> AppResult<ExplorePage> {
+        self.extractor
+            .get_explore_page(browse_id, params, region)
+            .await
+    }
+
+    pub async fn get_explore_grid(
+        &self,
+        target: Option<&ExploreTarget>,
+        continuation: Option<&str>,
+        region: Option<&str>,
+    ) -> AppResult<ExploreGrid> {
+        self.extractor
+            .get_explore_grid(target, continuation, region)
+            .await
+    }
+
+    /// Title, channel and counts for the first reels in `items` that came without them.
+    pub async fn fill_short_details(&self, items: &mut [ShortItem]) {
+        self.extractor.fill_reel_overlays(items).await;
+    }
+
+    pub async fn resolve_url(&self, url: &str) -> AppResult<ResolvedEndpoint> {
+        self.extractor.resolve_url(url).await
+    }
+
+    pub async fn get_search_suggestions(
+        &self,
+        query: &str,
+        region: Option<&str>,
+    ) -> AppResult<Vec<SearchSuggestion>> {
+        self.extractor.get_search_suggestions(query, region).await
     }
 
     pub async fn get_shorts_sequence(
@@ -121,39 +207,7 @@ impl YoutubeService {
             .await
     }
 
-    pub async fn search_music(&self, query: &str, filter: &str) -> AppResult<Vec<VideoSummary>> {
-        self.extractor.search_music(query, filter).await
-    }
-
     pub fn parse_subscription_export(&self, data: &str) -> AppResult<Vec<(String, String)>> {
         self.extractor.parse_subscription_export(data)
-    }
-
-    pub async fn get_music_lyrics(&self, video_id: &str) -> AppResult<Option<String>> {
-        self.extractor.get_music_lyrics(video_id).await
-    }
-
-    pub async fn get_music_related(&self, video_id: &str) -> AppResult<Vec<VideoSummary>> {
-        self.extractor.get_music_related(video_id).await
-    }
-
-    pub async fn get_music_album(&self, album_browse_id: &str) -> AppResult<Vec<VideoSummary>> {
-        self.extractor.get_music_album(album_browse_id).await
-    }
-
-    pub async fn get_music_home(&self) -> AppResult<(Vec<MusicHomeSection>, Vec<MusicHomeChip>)> {
-        self.extractor.get_music_home().await
-    }
-
-    pub async fn get_music_artist(&self, artist_browse_id: &str) -> AppResult<ArtistPage> {
-        self.extractor.get_music_artist(artist_browse_id).await
-    }
-
-    pub async fn get_music_explore(&self) -> AppResult<ExplorePage> {
-        self.extractor.get_music_explore().await
-    }
-
-    pub async fn get_music_charts(&self, continuation: Option<String>) -> AppResult<ChartsPage> {
-        self.extractor.get_music_charts(continuation).await
     }
 }

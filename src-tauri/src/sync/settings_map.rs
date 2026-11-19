@@ -4,10 +4,12 @@
 //! …) with typed values, so a shared setting is renamed and typed on the way out and mapped back
 //! on the way in. Settings only the desktop has travel under a `desktop.` prefix, which Android
 //! ignores and another desktop maps back. Older desktop builds sent raw desktop keys, which are
-//! still accepted.
+//! still accepted. The SponsorBlock actions, one JSON setting here, travel as Android's nine
+//! per-category settings.
 //!
 //! `default_video_codec` is deliberately not synced: an AV1 or VP9 preference that suits one device
-//! freezes video on a desktop or phone without that hardware decoder.
+//! freezes video on a desktop or phone without that hardware decoder. `skip_silence` stays out
+//! because the desktop has no such setting.
 
 use serde_json::Value;
 
@@ -38,6 +40,7 @@ const fn shared(canonical: &'static str, desktop: &'static str, kind: Kind) -> S
 /// Settings both platforms have, mirroring Android's `SettingsMapper.WHITELIST`.
 const SHARED: &[Shared] = &[
     shared("autoplay", "autoplay_enabled", Kind::Bool),
+    shared("queue_autoplay", "queue_autoplay_enabled", Kind::Bool),
     shared("default_quality_wifi", "default_quality_wifi", Kind::Text),
     shared("playback_speed", "playback_speed", Kind::Number),
     shared("sponsorblock_enabled", "sponsorblock_enabled", Kind::Bool),
@@ -54,7 +57,6 @@ const SHARED: &[Shared] = &[
     shared("comments_enabled", "comments_enabled", Kind::Bool),
     shared("return_youtube_dislikes", "rytd_enabled", Kind::Bool),
     shared("video_loop", "video_loop_enabled", Kind::Bool),
-    shared("skip_silence", "skip_silence_enabled", Kind::Bool),
     shared("stable_volume", "stable_volume_enabled", Kind::Bool),
     shared(
         "subscriptions_show_videos",
@@ -83,49 +85,117 @@ const SHARED: &[Shared] = &[
         "preferred_subtitle_language",
         Kind::Text,
     ),
+    // The whole equalizer as Android's `EqStateJson`, carried as one JSON string.
+    shared("equalizer", "eq_state_json", Kind::Text),
 ];
 
 /// Player, content and extension preferences only the desktop has. Download paths, proxy
 /// credentials, cache sizes, private ids and Deep Flow runtime state are deliberately absent.
 const DESKTOP_ONLY: &[&str] = &[
+    "autoplay_countdown_seconds",
     "allow_volume_boost",
     "remember_playback_speed",
+    "speed_per_channel",
+    "music_at_normal_speed",
     "custom_speeds_enabled",
     "custom_speed_presets",
     "long_press_playback_speed",
     "speed_slider_enabled",
     "double_tap_seek_seconds",
+    "double_click_seek_enabled",
     "subtitle_font_scale",
     "subtitle_bold",
     "mini_player_show_skip_controls",
     "mini_player_show_next_prev_controls",
+    "mini_player_continue_watching_enabled",
+    "mini_player_size",
+    "paid_promotion_label",
+    "idle_progress_strip_enabled",
+    "frame_step_buttons_enabled",
     "show_fullscreen_title",
+    "player_button_next_previous",
+    "player_button_volume",
+    "player_button_chapters",
+    "player_button_queue",
+    "player_button_live_chat",
+    "player_button_comments",
+    "player_button_sponsorblock",
+    "player_button_quality",
+    "player_button_captions",
+    "player_button_play_on",
+    "player_button_theater",
+    "player_button_fullscreen",
     "adaptive_player_size_enabled",
     "auto_pip_enabled",
     "manual_pip_button_enabled",
     "lyrics_provider_order",
     "lyrics_provider_enabled_states",
+    "music_player_background",
     "video_title_max_lines",
+    "video_hover_preview_mode",
     "download_dialog_style",
     "home_feed_enabled",
     "show_app_logo_icon",
+    "shorts_content_enabled",
+    "channel_shorts_tab_when_hidden",
+    "hide_watched_home_feed",
+    "hide_watched_subscriptions",
+    "hide_watched_shorts",
+    "watched_threshold",
+    "subs_show_checked_video_count",
     "shorts_shelf_enabled",
     "home_shorts_shelf_enabled",
     "continue_watching_enabled",
+    "home_subscriptions_enabled",
+    "refresh_home_on_reselect",
+    "home_max_video_age",
+    "hide_seen_videos",
     "show_related_videos",
     "disable_shorts_player",
     "shorts_navigation_enabled",
     "shorts_playback_mode",
     "shorts_auto_scroll_seconds",
     "music_navigation_enabled",
+    "music_content_enabled",
     "categories_nav_tab_enabled",
     "subscription_refresh_on_startup",
+    "subscription_collaborations_enabled",
+    "subs_sort_mode",
+    "notif_shorts_enabled",
+    "hide_unplayable_subscriptions",
     "show_region_picker_in_explore",
     "deep_flow_expire_hours",
     "deep_flow_save_history",
     "sponsorblock_server",
     "sponsorblock_colors",
-    "sponsorblock_categories",
+];
+
+/// The desktop keeps every SponsorBlock category's action in one JSON setting; Android keeps one
+/// setting per category (`sponsorblock_action_<category>`), which both apps read.
+pub const SB_ACTIONS_KEY: &str = "sponsorblock_categories";
+const SB_ACTION_PREFIX: &str = "sponsorblock_action_";
+const SB_CATEGORIES: [&str; 11] = [
+    "sponsor",
+    "intro",
+    "outro",
+    "selfpromo",
+    "interaction",
+    "music_offtopic",
+    "filler",
+    "preview",
+    "exclusive_access",
+    "hook",
+    "poi_highlight",
+];
+/// Desktop action to Android's `SponsorBlockAction` name.
+const SB_ACTIONS: [(&str, &str); 7] = [
+    ("skip", "SKIP"),
+    ("skip_once", "SKIP_ONCE"),
+    ("skip_button", "SKIP_BUTTON"),
+    ("mute", "MUTE"),
+    ("notify", "SHOW_TOAST"),
+    ("ignore", "IGNORE"),
+    ("disabled", "DISABLED"),
 ];
 
 const DESKTOP_PREFIX: &str = "desktop.";
@@ -136,28 +206,100 @@ pub fn desktop_keys() -> impl Iterator<Item = &'static str> {
         .iter()
         .map(|s| s.desktop)
         .chain(DESKTOP_ONLY.iter().copied())
+        .chain(std::iter::once(SB_ACTIONS_KEY))
 }
 
-/// The wire entry for a stored desktop setting, stamped with the time the row last changed.
+/// The wire entries for a stored desktop setting, stamped with the time the row last changed: one
+/// for most settings, one per category for the SponsorBlock actions.
 #[must_use]
 pub fn local_entry(
     desktop_key: &str,
     stored: &str,
     updated_at: &str,
     device_id: &str,
-) -> Option<SettingEntry> {
-    let (key, value) = to_wire(desktop_key, stored)?;
-    Some(SettingEntry {
+) -> Vec<SettingEntry> {
+    let hlc = Hlc::new(iso_to_ms(updated_at), 0, device_id);
+    let entry = |(key, value): (String, Value)| SettingEntry {
         key,
         value,
-        hlc: Hlc::new(iso_to_ms(updated_at), 0, device_id),
-    })
+        hlc: hlc.clone(),
+    };
+    if desktop_key == SB_ACTIONS_KEY {
+        return sb_actions_to_wire(stored).into_iter().map(entry).collect();
+    }
+    to_wire(desktop_key, stored)
+        .map(entry)
+        .into_iter()
+        .collect()
+}
+
+/// Whether a wire key is one of Android's per-category SponsorBlock actions.
+#[must_use]
+pub fn is_sb_action(wire_key: &str) -> bool {
+    wire_key
+        .strip_prefix(SB_ACTION_PREFIX)
+        .is_some_and(|category| SB_CATEGORIES.contains(&category))
+}
+
+/// The desktop's stored SponsorBlock actions as Android's per-category settings. Categories with
+/// no action, or one Android doesn't have, are left out.
+fn sb_actions_to_wire(stored: &str) -> Vec<(String, Value)> {
+    let Ok(Value::Object(actions)) = serde_json::from_str::<Value>(stored) else {
+        return Vec::new();
+    };
+    SB_CATEGORIES
+        .iter()
+        .filter_map(|category| {
+            let action = actions.get(*category)?.as_str()?;
+            let (_, android) = SB_ACTIONS.iter().find(|(desktop, _)| *desktop == action)?;
+            Some((
+                format!("{SB_ACTION_PREFIX}{category}"),
+                Value::String((*android).to_string()),
+            ))
+        })
+        .collect()
+}
+
+/// The desktop's SponsorBlock actions setting, with the categories of `incoming` wire entries
+/// written over `current`. `None` when no entry names a known category and action.
+#[must_use]
+pub fn sb_actions_from_wire<'a>(
+    current: Option<&str>,
+    incoming: impl IntoIterator<Item = &'a SettingEntry>,
+) -> Option<(&'static str, String)> {
+    let mut actions = match current.map(serde_json::from_str::<Value>) {
+        Some(Ok(Value::Object(map))) => map,
+        _ => serde_json::Map::new(),
+    };
+    let mut changed = false;
+    for entry in incoming {
+        let Some(category) = entry.key.strip_prefix(SB_ACTION_PREFIX) else {
+            continue;
+        };
+        let desktop = entry.value.as_str().and_then(|android| {
+            SB_ACTIONS
+                .iter()
+                .find(|(_, name)| *name == android)
+                .map(|(desktop, _)| *desktop)
+        });
+        if let Some(desktop) = desktop.filter(|_| SB_CATEGORIES.contains(&category)) {
+            actions.insert(category.to_string(), Value::String(desktop.to_string()));
+            changed = true;
+        }
+    }
+    changed.then(|| (SB_ACTIONS_KEY, Value::Object(actions).to_string()))
 }
 
 /// The wire key and typed value for a stored desktop setting. `None` for a key that doesn't sync.
 #[must_use]
 pub fn to_wire(desktop_key: &str, stored: &str) -> Option<(String, Value)> {
     if let Some(s) = SHARED.iter().find(|s| s.desktop == desktop_key) {
+        // Android has no 8K setting and reads a label it doesn't know as Auto.
+        let stored = if desktop_key == "default_quality_wifi" && stored == "4320p" {
+            "2160p"
+        } else {
+            stored
+        };
         return Some((s.canonical.to_string(), typed(s.kind, stored)));
     }
     DESKTOP_ONLY.contains(&desktop_key).then(|| {
@@ -172,6 +314,9 @@ pub fn to_wire(desktop_key: &str, stored: &str) -> Option<(String, Value)> {
 /// names older desktop builds sent. `None` for anything this desktop doesn't sync.
 #[must_use]
 pub fn normalize_wire_key(key: &str) -> Option<String> {
+    if is_sb_action(key) {
+        return Some(key.to_string());
+    }
     if let Some(s) = SHARED
         .iter()
         .find(|s| s.canonical == key || s.desktop == key)
@@ -215,5 +360,75 @@ fn typed(kind: Kind, stored: &str) -> Value {
             .and_then(serde_json::Number::from_f64)
             .map_or_else(|| Value::String(stored.to_string()), Value::Number),
         Kind::Text => Value::String(stored.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn queue_autoplay_uses_androids_name_both_ways() {
+        assert_eq!(
+            to_wire("queue_autoplay_enabled", "false"),
+            Some(("queue_autoplay".to_string(), json!(false)))
+        );
+        assert_eq!(
+            from_wire("queue_autoplay", &json!(false)),
+            Some(("queue_autoplay_enabled", "false".to_string()))
+        );
+    }
+
+    #[test]
+    fn every_android_sponsorblock_action_and_category_crosses_both_ways() {
+        let stored = serde_json::json!({
+            "sponsor": "skip_once",
+            "intro": "skip_button",
+            "outro": "disabled",
+            "hook": "notify",
+            "poi_highlight": "skip_button",
+        })
+        .to_string();
+        let wire = sb_actions_to_wire(&stored);
+        let sent = |key: &str| wire.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone());
+        assert_eq!(
+            sent("sponsorblock_action_sponsor"),
+            Some(json!("SKIP_ONCE"))
+        );
+        assert_eq!(
+            sent("sponsorblock_action_intro"),
+            Some(json!("SKIP_BUTTON"))
+        );
+        assert_eq!(sent("sponsorblock_action_outro"), Some(json!("DISABLED")));
+        assert_eq!(sent("sponsorblock_action_hook"), Some(json!("SHOW_TOAST")));
+        assert_eq!(
+            sent("sponsorblock_action_poi_highlight"),
+            Some(json!("SKIP_BUTTON"))
+        );
+
+        assert!(is_sb_action("sponsorblock_action_hook"));
+        assert!(is_sb_action("sponsorblock_action_poi_highlight"));
+        let hlc = Hlc::new(0, 0, "device");
+        let incoming: Vec<SettingEntry> = wire
+            .into_iter()
+            .map(|(key, value)| SettingEntry {
+                key,
+                value,
+                hlc: hlc.clone(),
+            })
+            .collect();
+        let (key, back) = sb_actions_from_wire(None, &incoming).unwrap();
+        assert_eq!(key, SB_ACTIONS_KEY);
+        assert_eq!(
+            serde_json::from_str::<Value>(&back).unwrap(),
+            serde_json::from_str::<Value>(&stored).unwrap()
+        );
+    }
+
+    #[test]
+    fn the_autoplay_delay_stays_among_desktops() {
+        let (key, _) = to_wire("autoplay_countdown_seconds", "5").unwrap();
+        assert_eq!(key, "desktop.autoplay_countdown_seconds");
     }
 }

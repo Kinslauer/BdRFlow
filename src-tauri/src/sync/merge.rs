@@ -27,10 +27,11 @@ use serde::Serialize;
 
 use crate::sync::canonical::{
     AffinityWire, BrainCounters, BrainFlags, BrainLwwMaps, BrainPerVideo, BrainSets, BrainVectors,
-    ContentVectorWire, FlowNeuroBrainSnapshot, GCounter, Hlc, Like, LikeKind, Lww,
-    MusicBrainSnapshot, OrSet, Playlist, PlaylistItem, PlaylistOrigin, SettingEntry,
+    ContentVectorWire, FlowNeuroBrainSnapshot, GCounter, GroupMember, Hlc, Like, LikeKind, Lww,
+    MusicBrainSnapshot, Note, OrSet, Playlist, PlaylistItem, PlaylistOrigin, SettingEntry,
     SubscribedChannel, SubscriptionGroup, TrackMetaWire, WatchHistoryRecord,
 };
+use crate::sync::saved_shorts::SAVED_SHORTS_SYNC_ID;
 
 // ===========================================================================================
 // Generic primitive helpers
@@ -175,6 +176,13 @@ fn merge_one_watch(a: &WatchHistoryRecord, b: &WatchHistoryRecord) -> WatchHisto
         progress: a.progress.max(b.progress),
         is_music: a.is_music || b.is_music,
         is_short: a.is_short || b.is_short,
+        // As Android does: the newer record's picture, else whichever side has one.
+        thumbnail_url: hi
+            .thumbnail_url
+            .clone()
+            .filter(|url| !url.is_empty())
+            .or_else(|| a.thumbnail_url.clone().filter(|url| !url.is_empty()))
+            .or_else(|| b.thumbnail_url.clone().filter(|url| !url.is_empty())),
         deleted: hi.deleted,
         hlc: Hlc::max(&a.hlc, &b.hlc),
     }
@@ -243,6 +251,7 @@ fn is_reconcilable(p: &Playlist) -> bool {
         && !p.is_protected
         && p.is_user_created
         && p.origin == PlaylistOrigin::Local
+        && p.sync_id != SAVED_SHORTS_SYNC_ID
         && !normalize_title(&p.title).is_empty()
 }
 
@@ -403,7 +412,8 @@ pub fn merge_subscriptions(
 ) -> Vec<SubscriptionGroup> {
     let mut map: BTreeMap<String, SubscriptionGroup> = BTreeMap::new();
     for mut g in a.into_iter().chain(b) {
-        normalize_channel_ids(&mut g.channel_ids);
+        g.members = merge_members(members_of(&g), Vec::new());
+        g.channel_ids = live_channels(&g.members);
         match map.remove(&g.name) {
             Some(existing) => {
                 map.insert(g.name.clone(), merge_one_subscription(&existing, &g));
@@ -416,15 +426,53 @@ pub fn merge_subscriptions(
     map.into_values().collect()
 }
 
-fn normalize_channel_ids(ids: &mut Vec<String>) {
-    let set: BTreeSet<String> = ids.drain(..).filter(|c| !c.is_empty()).collect();
-    *ids = set.into_iter().collect();
+/// A group's members; a record without them has each of its `channel_ids` live at its `hlc`.
+fn members_of(g: &SubscriptionGroup) -> Vec<GroupMember> {
+    if !g.members.is_empty() {
+        return g.members.clone();
+    }
+    g.channel_ids
+        .iter()
+        .map(|channel_id| GroupMember {
+            channel_id: channel_id.clone(),
+            deleted: false,
+            hlc: g.hlc.clone(),
+        })
+        .collect()
+}
+
+/// Last writer wins per channel, where a tombstone wins a tie, as for playlist items.
+fn merge_members(a: Vec<GroupMember>, b: Vec<GroupMember>) -> Vec<GroupMember> {
+    let mut by_channel: BTreeMap<String, GroupMember> = BTreeMap::new();
+    for member in a.into_iter().chain(b).filter(|m| !m.channel_id.is_empty()) {
+        let merged = match by_channel.remove(&member.channel_id) {
+            Some(existing) => GroupMember {
+                deleted: tombstone_wins(
+                    existing.deleted,
+                    &existing.hlc,
+                    member.deleted,
+                    &member.hlc,
+                ),
+                hlc: Hlc::max(&existing.hlc, &member.hlc),
+                channel_id: member.channel_id,
+            },
+            None => member,
+        };
+        by_channel.insert(merged.channel_id.clone(), merged);
+    }
+    by_channel.into_values().collect()
+}
+
+fn live_channels(members: &[GroupMember]) -> Vec<String> {
+    members
+        .iter()
+        .filter(|m| !m.deleted)
+        .map(|m| m.channel_id.clone())
+        .collect()
 }
 
 fn merge_one_subscription(a: &SubscriptionGroup, b: &SubscriptionGroup) -> SubscriptionGroup {
-    let mut set: BTreeSet<String> = a.channel_ids.iter().cloned().collect();
-    set.extend(b.channel_ids.iter().cloned());
-    let channel_ids: Vec<String> = set.into_iter().collect();
+    let members = merge_members(a.members.clone(), b.members.clone());
 
     let sort_order = match a.hlc.cmp(&b.hlc) {
         std::cmp::Ordering::Greater => a.sort_order,
@@ -439,9 +487,10 @@ fn merge_one_subscription(a: &SubscriptionGroup, b: &SubscriptionGroup) -> Subsc
     };
 
     SubscriptionGroup {
-        channel_ids,
+        channel_ids: live_channels(&members),
         deleted: tombstone_wins(a.deleted, &a.hlc, b.deleted, &b.hlc),
         hlc: Hlc::max(&a.hlc, &b.hlc),
+        members,
         name: a.name.clone(),
         sort_order,
     }
@@ -502,6 +551,46 @@ fn merge_one_channel(a: &SubscribedChannel, b: &SubscribedChannel) -> Subscribed
         hlc: Hlc::max(&a.hlc, &b.hlc),
         deleted: tombstone_wins(a.deleted, &a.hlc, b.deleted, &b.hlc),
     }
+}
+
+// ===========================================================================================
+// Notes
+// ===========================================================================================
+
+/// Merge notes by `id`, as Android's `NotesMerger`: a note is one field the user typed, so the
+/// later edit wins outright.
+#[must_use]
+pub fn merge_notes(a: Vec<Note>, b: Vec<Note>) -> Vec<Note> {
+    let mut map: BTreeMap<String, Note> = a
+        .into_iter()
+        .filter(|n| !n.id.is_empty())
+        .map(|n| (n.id.clone(), n))
+        .collect();
+    for n in b.into_iter().filter(|n| !n.id.is_empty()) {
+        match map.get_mut(&n.id) {
+            Some(e) => *e = merge_one_note(e, &n),
+            None => {
+                map.insert(n.id.clone(), n);
+            }
+        }
+    }
+    map.into_values().collect()
+}
+
+fn merge_one_note(x: &Note, y: &Note) -> Note {
+    let x_wins = if x.updated_at != y.updated_at {
+        x.updated_at > y.updated_at
+    } else if x.deleted != y.deleted {
+        // Same instant on two devices: a clear is never undone by a stale edit.
+        x.deleted
+    } else if x.text != y.text {
+        // Kotlin compares strings by UTF-16 code unit, which UTF-8 byte order doesn't match.
+        x.text.encode_utf16().gt(y.text.encode_utf16())
+    } else {
+        // Filling in what a note is about leaves its time alone, so the copy that knows wins.
+        x.title.is_some() || y.title.is_none()
+    };
+    if x_wins { x.clone() } else { y.clone() }
 }
 
 // ===========================================================================================

@@ -1,10 +1,13 @@
 import React, { useState } from "react";
 import { Disc3, Music2, Plus, X } from "lucide-react";
-import { getString } from "../../lib/i18n/index";
+import { getPlural, getString } from "../../lib/i18n/index";
 import { Button } from "../ui/Button";
 import { upgradeMusicImageUrl } from "../../lib/thumbnails";
 import { useProxiedImageUrl } from "../../lib/useProxiedImageUrl";
-import { useAlbumLibraryStore, type StoredAlbum } from "../../store/useAlbumLibraryStore";
+import { albumDetailPath, useAlbumLibraryStore, type StoredAlbum } from "../../store/useAlbumLibraryStore";
+import { songVideoId } from "../../lib/useLikes";
+import { showSaveToast } from "../../lib/saveToast";
+import { songToastItem } from "../../lib/songLikeToast";
 import { useUiStore } from "../../store/useUiStore";
 
 function AlbumRowArt({ album }: { album: StoredAlbum }) {
@@ -28,9 +31,10 @@ function AlbumRowArt({ album }: { album: StoredAlbum }) {
 }
 
 export function AddToAlbumModal() {
-  const addTarget = useAlbumLibraryStore((s) => s.addTarget);
+  const targets = useAlbumLibraryStore((s) => s.addTargets);
   const albums = useAlbumLibraryStore((s) => s.albums);
-  const addTrack = useAlbumLibraryStore((s) => s.addTrack);
+  const addTracks = useAlbumLibraryStore((s) => s.addTracks);
+  const removeTracks = useAlbumLibraryStore((s) => s.removeTracks);
   const createAlbum = useAlbumLibraryStore((s) => s.createAlbum);
   const closeAddToAlbum = useAlbumLibraryStore((s) => s.closeAddToAlbum);
   const showToast = useUiStore((s) => s.showToast);
@@ -38,7 +42,7 @@ export function AddToAlbumModal() {
   const [creating, setCreating] = useState(false);
   const [newName, setNewName] = useState("");
 
-  if (!addTarget) return null;
+  if (targets.length === 0) return null;
 
   const ownedAlbums = albums.filter((album) => album.source === "Owned");
 
@@ -48,9 +52,21 @@ export function AddToAlbumModal() {
     closeAddToAlbum();
   };
 
-  const handleAdd = async (albumId: string) => {
-    await addTrack(albumId, addTarget);
-    showToast({ variant: "success", message: getString("album_added_toast") });
+  const single = targets.length === 1 ? targets[0] : null;
+  const subject = single?.title ?? getPlural("music_song_count", targets.length);
+
+  const add = async (album: StoredAlbum) => {
+    try {
+      const added = await addTracks(album.id, targets);
+      showSaveToast({
+        destination: { kind: "album", path: albumDetailPath(album), name: album.title },
+        item: single ? songToastItem(single) : { title: subject, image: targets[0]?.thumbnail, shape: "square" },
+        undo: added.length > 0 ? () => removeTracks(album.id, added.map(songVideoId)) : undefined,
+      });
+    } catch (error) {
+      console.error("Failed to add songs to the album", error);
+      showToast({ variant: "error", message: getString("toast_action_failed") });
+    }
     close();
   };
 
@@ -58,9 +74,7 @@ export function AddToAlbumModal() {
     event.preventDefault();
     if (!newName.trim()) return;
     const album = await createAlbum(newName);
-    await addTrack(album.id, addTarget);
-    showToast({ variant: "success", message: getString("album_added_toast") });
-    close();
+    await add(album);
   };
 
   return (
@@ -77,7 +91,7 @@ export function AddToAlbumModal() {
             <h3 className="text-lg font-bold text-chrome-neutral-100">
               {getString("album_add_modal_title")}
             </h3>
-            <p className="mt-0.5 line-clamp-1 text-sm text-chrome-neutral-400">{addTarget.title}</p>
+            <p className="mt-0.5 line-clamp-1 text-sm text-chrome-neutral-400">{subject}</p>
           </div>
           <button
             type="button"
@@ -89,19 +103,19 @@ export function AddToAlbumModal() {
           </button>
         </div>
 
-        <div className="mt-4 max-h-72 space-y-1 overflow-y-auto hide-scrollbar">
+        <div className="mt-4 max-h-72 space-y-1 overflow-y-auto">
           {ownedAlbums.map((album) => (
             <button
               key={album.id}
               type="button"
-              onClick={() => void handleAdd(album.id)}
-              className="flex w-full items-center gap-3 rounded-lg p-2 text-left transition-colors hover:bg-surface-container-high"
+              onClick={() => void add(album)}
+              className="flex w-full items-center gap-3 rounded-lg p-2 text-start transition-colors hover:bg-surface-container-high"
             >
               <AlbumRowArt album={album} />
               <span className="min-w-0 flex-1">
-                <span className="line-clamp-1 text-sm font-medium text-chrome-neutral-100">{album.title}</span>
+                <span dir="auto" className="line-clamp-1 text-sm font-medium text-chrome-neutral-100">{album.title}</span>
                 <span className="line-clamp-1 text-xs text-chrome-neutral-500">
-                  {(album.tracks?.length ?? 0)} {(album.tracks?.length ?? 0) === 1 ? "song" : "songs"}
+                  {getPlural("music_song_count", album.tracks?.length ?? 0)}
                 </span>
               </span>
             </button>
@@ -149,7 +163,7 @@ export function AddToAlbumModal() {
           <button
             type="button"
             onClick={() => setCreating(true)}
-            className="mt-3 flex w-full items-center gap-3 rounded-lg p-2 text-left text-sm font-medium text-[var(--color-primary)] transition-colors hover:bg-surface-container-high"
+            className="mt-3 flex w-full items-center gap-3 rounded-lg p-2 text-start text-sm font-medium text-[var(--color-primary)] transition-colors hover:bg-surface-container-high"
           >
             <span className="grid h-10 w-10 shrink-0 place-items-center rounded-md bg-surface-container-high">
               <Plus size={18} />

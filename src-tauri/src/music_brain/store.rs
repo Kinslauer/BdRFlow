@@ -18,7 +18,7 @@ use crate::errors::AppResult;
 use super::backfill::backfill_if_needed;
 use super::learn::{
     MusicSignal, SESSION_GAP_MS, apply_music_dislike, apply_music_signal, block_music_artist,
-    newly_crossed, unblock_music_artist,
+    favourite_artist, newly_crossed, set_favourite_artist, unblock_music_artist,
 };
 use super::model::MusicBrain;
 
@@ -68,7 +68,7 @@ impl Drop for MusicBrainWriteGuard<'_> {
 
 impl MusicBrainStore {
     pub async fn load(pool: SqlitePool) -> AppResult<Arc<Self>> {
-        let mut brain = get_or_create(&pool).await?;
+        let mut brain = stored_brain(&pool).await?;
         // One-time warm start from existing music watch history.
         if let Err(error) = backfill_if_needed(&pool, &mut brain).await {
             warn!(%error, "[MusicBrain] backfill failed; starting cold");
@@ -147,7 +147,6 @@ impl MusicBrainStore {
             track_id: track_id.to_string(),
             artist_key: artist_key.to_string(),
             genre: genre.map(str::to_string),
-            percent_played: next,
             is_explicit_like,
             title: title.map(str::to_string),
             artist_display: artist_display.map(str::to_string),
@@ -169,6 +168,18 @@ impl MusicBrainStore {
         let now = now_ms();
         let mut brain = self.write().await;
         apply_music_dislike(&mut brain, artist_key, now);
+    }
+
+    /// Picked by hand, as at setup: seeds the music taste alone, never the video engine.
+    pub async fn set_favourite_artist(&self, artist_key: &str, favourite: bool) {
+        let mut brain = self.write().await;
+        set_favourite_artist(&mut brain, artist_key, favourite);
+    }
+
+    /// Lifts an artist the listener picked. True when they were not a favourite yet.
+    pub async fn favourite_artist(&self, artist_key: &str, display: &str) -> bool {
+        let mut brain = self.write().await;
+        favourite_artist(&mut brain, artist_key, display)
     }
 
     /// Hard-block an artist ("don't recommend this artist") — a permanent denylist entry.
@@ -236,7 +247,7 @@ impl MusicBrainStore {
     /// Replace the resident brain with the latest copy persisted in the DB (after the sync merge
     /// wrote `user_music_brain` directly). Clears dirty + ephemeral session state.
     pub async fn reload(&self) -> AppResult<()> {
-        let fresh = get_or_create(&self.pool).await?;
+        let fresh = stored_brain(&self.pool).await?;
         *self.brain.write().await = fresh;
         self.dirty.store(false, Ordering::Relaxed);
         self.live_progress.lock().unwrap().clear();
@@ -257,7 +268,8 @@ impl MusicBrainStore {
     }
 }
 
-async fn get_or_create(pool: &SqlitePool) -> AppResult<MusicBrain> {
+/// The brain kept in a profile's database, or a fresh one when there is none; it only reads.
+pub async fn stored_brain(pool: &SqlitePool) -> AppResult<MusicBrain> {
     if let Some(json) = settings::get_setting(pool, SETTINGS_KEY).await? {
         match serde_json::from_str::<MusicBrain>(&json) {
             Ok(mut brain) => {

@@ -1,6 +1,6 @@
 use std::sync::Mutex;
 
-use tauri::{State, WebviewWindow};
+use tauri::{State, Window};
 
 use crate::errors::{AppError, ErrorResponse};
 
@@ -17,25 +17,25 @@ trait FullscreenWindowOps {
     fn maximize(&self) -> Result<(), String>;
 }
 
-impl FullscreenWindowOps for WebviewWindow {
+impl FullscreenWindowOps for Window {
     fn is_fullscreen(&self) -> Result<bool, String> {
-        WebviewWindow::is_fullscreen(self).map_err(|error| error.to_string())
+        Window::is_fullscreen(self).map_err(|error| error.to_string())
     }
 
     fn is_maximized(&self) -> Result<bool, String> {
-        WebviewWindow::is_maximized(self).map_err(|error| error.to_string())
+        Window::is_maximized(self).map_err(|error| error.to_string())
     }
 
     fn unmaximize(&self) -> Result<(), String> {
-        WebviewWindow::unmaximize(self).map_err(|error| error.to_string())
+        Window::unmaximize(self).map_err(|error| error.to_string())
     }
 
     fn set_fullscreen(&self, fullscreen: bool) -> Result<(), String> {
-        WebviewWindow::set_fullscreen(self, fullscreen).map_err(|error| error.to_string())
+        Window::set_fullscreen(self, fullscreen).map_err(|error| error.to_string())
     }
 
     fn maximize(&self) -> Result<(), String> {
-        WebviewWindow::maximize(self).map_err(|error| error.to_string())
+        Window::maximize(self).map_err(|error| error.to_string())
     }
 }
 
@@ -87,7 +87,7 @@ fn apply_player_fullscreen<W: FullscreenWindowOps>(
 /// undecorated maximized window.
 #[tauri::command]
 pub fn set_player_fullscreen(
-    window: WebviewWindow,
+    window: Window,
     state: State<'_, PlayerFullscreenState>,
     fullscreen: bool,
 ) -> Result<(), ErrorResponse> {
@@ -115,7 +115,7 @@ pub fn set_player_fullscreen(
 
 #[tauri::command]
 pub fn set_window_background(
-    window: WebviewWindow,
+    window: Window,
     color: tauri::window::Color,
 ) -> Result<(), ErrorResponse> {
     window.set_background_color(Some(color)).map_err(|error| {

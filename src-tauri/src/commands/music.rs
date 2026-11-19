@@ -29,6 +29,7 @@ use crate::models::music_stream::{MusicAudioQuality, MusicStreamInfo};
 use crate::music_brain::store::MusicBrainStore;
 use crate::security::validation::{validate_search_query, validate_video_id};
 use crate::services::music_service::{Freshness, MusicService};
+use crate::streaming::hls;
 use crate::streaming::images::{image_content_type, is_local_host, proxyable_image_url};
 use crate::streaming::proxy::StreamingManager;
 
@@ -345,9 +346,28 @@ pub async fn get_music_linked_artists(
 pub async fn get_music_lyrics_typed(
     video_id: String,
     music: State<'_, MusicService>,
-) -> CmdResult<Option<String>> {
+) -> CmdResult<Option<crate::models::music_pages::MusicLyrics>> {
     validate_video_id(&video_id).map_err(ErrorResponse::from)?;
     music.lyrics(&video_id).await.map_err(ErrorResponse::from)
+}
+
+/// A song's `YouTube` captions as `.lrc` text, or `None` when it has none.
+#[tauri::command]
+pub async fn get_music_captions_lrc(
+    video_id: String,
+    music: State<'_, MusicService>,
+) -> CmdResult<Option<String>> {
+    validate_video_id(&video_id).map_err(ErrorResponse::from)?;
+    music
+        .captions_lrc(&video_id)
+        .await
+        .map_err(ErrorResponse::from)
+}
+
+/// A Latin line per lyric line, made on this computer. Empty for Japanese lyrics.
+#[tauri::command]
+pub async fn romanize_lyrics(lines: Vec<String>) -> Vec<Option<String>> {
+    crate::api::lyrics_romanize::romanize_lines(&lines)
 }
 
 #[derive(serde::Serialize)]
@@ -357,35 +377,19 @@ pub struct LyricsHttpResponse {
     pub body: String,
 }
 
-/// Generic HTTPS GET passthrough for the client-side lyrics engine — the lyric
-/// providers are external services that the webview can't reach due to CORS.
+/// HTTPS GET passthrough for the client-side lyrics engine, limited to the lyrics providers.
 #[tauri::command]
 pub async fn lyrics_http_get(
     url: String,
     headers: Option<HashMap<String, String>>,
 ) -> CmdResult<LyricsHttpResponse> {
-    if !url.starts_with("https://") {
-        return Err(ErrorResponse::from(AppError::Validation(
-            "Only https URLs are allowed".into(),
-        )));
-    }
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
-        .build()
-        .map_err(|e| ErrorResponse::from(AppError::Extractor(e.to_string())))?;
-    let mut req = client.get(&url);
-    if let Some(h) = headers {
-        for (k, v) in h {
-            req = req.header(k, v);
-        }
-    }
-    let resp = req
-        .send()
+    let response = crate::api::lyrics_http::get(&url, headers.unwrap_or_default())
         .await
-        .map_err(|e| ErrorResponse::from(AppError::Extractor(e.to_string())))?;
-    let status = resp.status().as_u16();
-    let body = resp.text().await.unwrap_or_default();
-    Ok(LyricsHttpResponse { status, body })
+        .map_err(ErrorResponse::from)?;
+    Ok(LyricsHttpResponse {
+        status: response.status,
+        body: response.body,
+    })
 }
 
 // --- Playback (reuses the shared streaming proxy) -------------------------
@@ -395,6 +399,7 @@ pub async fn lyrics_http_get(
 pub async fn get_music_stream(
     video_id: String,
     audio_quality: Option<String>,
+    prefer_aac: Option<bool>,
     music: State<'_, MusicService>,
     streaming_manager: State<'_, StreamingManager>,
 ) -> CmdResult<MusicStreamInfo> {
@@ -407,7 +412,7 @@ pub async fn get_music_stream(
         .unwrap_or_default();
 
     let mut info = music
-        .resolve_stream(&video_id, audio_quality)
+        .resolve_stream(&video_id, audio_quality, prefer_aac.unwrap_or(false))
         .await
         .map_err(ErrorResponse::from)?;
 
@@ -427,7 +432,20 @@ pub async fn get_music_stream(
         info.user_agent.clone(),
     );
     let port = streaming_manager.get_port();
-    info.audio_url = format!("http://127.0.0.1:{port}/stream/{token}");
+    let media = format!("/stream/{token}");
+    info.audio_url = format!("http://127.0.0.1:{port}{media}");
+    if hls::SERVE_AAC_AS_HLS
+        && info.mime_type.starts_with("audio/mp4")
+        && let Some(playlist) = hls::aac_playlist(port, &media).await
+    {
+        let token = uuid::Uuid::new_v4().to_string();
+        streaming_manager.register_inline_session(
+            token.clone(),
+            playlist.into_bytes(),
+            "application/vnd.apple.mpegurl".into(),
+        );
+        info.audio_url = format!("http://127.0.0.1:{port}/stream/{token}");
+    }
     info.user_agent = String::new();
 
     Ok(info)
@@ -473,12 +491,54 @@ pub async fn proxy_image_url(
     ))
 }
 
-/// Base URL of the proxy's image route when the webview can't fetch HTTPS
-/// images itself (the Linux AppImage, see `streaming::images`); `None`
-/// everywhere else, where images load directly.
+/// True for an https URL on Apple's streaming hosts, the only place motion artwork comes from.
+fn is_artwork_loop_url(url: &reqwest::Url) -> bool {
+    url.scheme() == "https"
+        && url
+            .host_str()
+            .is_some_and(|host| host.ends_with(".apple.com") || host.ends_with(".mzstatic.com"))
+}
+
+/// A local URL for a motion artwork playlist. The webview's CSP allows media and fetches only from
+/// the proxy, and a segment's own URL goes after the same `?url=`, as with a live stream's playlist.
 #[tauri::command]
-pub fn image_proxy_base(streaming_manager: State<'_, StreamingManager>) -> Option<String> {
-    let needed = cfg!(target_os = "linux") && std::env::var_os("APPIMAGE").is_some();
+pub async fn proxy_artwork_loop(
+    url: String,
+    streaming_manager: State<'_, StreamingManager>,
+) -> CmdResult<String> {
+    let parsed = reqwest::Url::parse(url.trim())
+        .map_err(|_| ErrorResponse::from(AppError::Validation("Invalid artwork URL".into())))?;
+    if !is_artwork_loop_url(&parsed) {
+        return Err(ErrorResponse::from(AppError::Validation(
+            "Unsupported artwork URL".into(),
+        )));
+    }
+    let token = format!("loop-{}", Uuid::new_v4());
+    streaming_manager.register_session(
+        token.clone(),
+        parsed.to_string(),
+        "application/vnd.apple.mpegurl".to_string(),
+        crate::api::http::BROWSER_USER_AGENT.to_string(),
+    );
+    let mut local = reqwest::Url::parse(&format!(
+        "http://127.0.0.1:{}/proxy/{token}",
+        streaming_manager.get_port()
+    ))
+    .map_err(|_| ErrorResponse::from(AppError::Validation("Invalid proxy URL".into())))?;
+    local.query_pairs_mut().append_pair("url", parsed.as_str());
+    Ok(local.to_string())
+}
+
+/// Base URL of the proxy's image route when the webview shouldn't fetch images
+/// itself: the Linux AppImage can't over HTTPS (see `streaming::images`), and
+/// `app_proxy` asks for it so images follow the user's proxy. `None` everywhere
+/// else, where images load directly.
+#[tauri::command]
+pub fn image_proxy_base(
+    streaming_manager: State<'_, StreamingManager>,
+    app_proxy: bool,
+) -> Option<String> {
+    let needed = app_proxy || (cfg!(target_os = "linux") && std::env::var_os("APPIMAGE").is_some());
     needed.then(|| {
         format!(
             "http://127.0.0.1:{}/img/{}",
@@ -486,4 +546,18 @@ pub fn image_proxy_base(streaming_manager: State<'_, StreamingManager>) -> Optio
             crate::streaming::images::route_token()
         )
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn artwork_loops_only_come_from_apple_over_https() {
+        let ok = |raw: &str| is_artwork_loop_url(&reqwest::Url::parse(raw).unwrap());
+        assert!(ok("https://mvod.itunes.apple.com/itunes-assets/x.m3u8"));
+        assert!(!ok("http://mvod.itunes.apple.com/x.m3u8"));
+        assert!(!ok("https://evil.example/x.m3u8"));
+        assert!(!ok("https://apple.com.evil.example/x.m3u8"));
+    }
 }

@@ -1,26 +1,88 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as dashjs from "dashjs";
 import Hls from "hls.js";
-import { AlertTriangle, Loader2, RotateCcw } from "lucide-react";
+import { Loader2, RotateCcw } from "lucide-react";
 import { PlayerErrorState } from "../ui/PlayerErrorState";
+import { CurrentVideoReminderButton } from "../watch/UpcomingReminderButton";
 import type { PlayerErrorInfo } from "../../lib/playerError";
 import { getString } from "../../lib/i18n/index";
 import { SUBTITLE_FONT_SCALES, usePlayerStore } from "../../store/usePlayerStore";
-import { useSettingsStore, type SponsorBlockCategory, type SponsorBlockAction } from "../../store/useSettingsStore";
-import type { AudioTrack, CaptionTrack, StreamVariant, VideoChapter } from "../../types/video";
+import { useShallow } from "zustand/react/shallow";
+import { useSettingsStore, type SponsorBlockCategory } from "../../store/useSettingsStore";
+import type {
+  AudioTrack,
+  CaptionTrack,
+  HeatmapMarker,
+  StoryboardLevel,
+  StreamVariant,
+  VideoChapter,
+} from "../../types/video";
+import { CodecMissingBanner } from "./CodecMissingBanner";
 import { FlowPlayerControls } from "./FlowPlayerControls";
 import { MiniPlayerControls } from "./MiniPlayerControls";
+import {
+  allVideoRepresentations,
+  autoBitrateCapKbps,
+  autoQualityBox,
+  autoRepresentationToSwitchTo,
+  droppedLastAdaptationSet,
+  nearestSupportedQuality,
+  representationLabel,
+  representationLabelWithCodec,
+  settleAutoVideoTrack,
+  type DashVideoTrack,
+  type PlayerBox,
+} from "../../lib/dashVideoTrack";
+import {
+  manifestVideoTracks,
+  measuresConnectionSpeed,
+  pickDashStart,
+  readMeasuredSpeedKbps,
+  recordVideoSegmentSpeed,
+} from "../../lib/dashStartQuality";
+import {
+  codecFamily,
+  codecToLeaveAfterDecodeError,
+  codecToLeaveWhenNoPicture,
+  isCodecRuledOut,
+  withoutRuledOutCodecs,
+  type VideoCodecFamily,
+} from "../../lib/codecHealth";
+import { useCodecHealthStore } from "../../store/useCodecHealthStore";
 import { sponsorBlockCategoryLabel } from "../../lib/sponsorBlockCategories";
 import { usePersistedPlayerVolume } from "../../lib/usePersistedPlayerVolume";
 import { recordPlayerEvent } from "../../lib/playerDiagnostics";
-import {
-  PlayerGestureOverlay,
-  type PlayerSeekFeedback,
-  type PlayerVolumeFeedback,
-} from "./gesture/overlay";
-import { SubtitleOverlay } from "./SubtitleOverlay";
+import { shouldPublishPlaybackTime } from "../../lib/playerProgress";
+import { SponsorBlockTracker } from "../../lib/sponsorBlockPolicy";
+import { useManualSponsorSegment } from "../../lib/useManualSponsorSegment";
+import { useVolumeFeedback } from "../../lib/useVolumeFeedback";
+import { useSeekFeedback } from "../../lib/useSeekFeedback";
+import type { SponsorBlockSegment } from "../../lib/api/foss";
+import { recapSponsorSkip } from "../../lib/recap/recapQueue";
+import { longPressRate } from "../../lib/pointerGesture";
+import { isPopOutWindow } from "../../lib/api/pip";
+import { PlayerGestureOverlay } from "./gesture/overlay";
+import { PlayerSubtitles } from "./PlayerSubtitles";
+import { webkitGtkBufferSettings } from "../../lib/dashSetup";
+import { dashErrorDetails } from "../../lib/dashErrorDetails";
+import { isLocalCaption } from "../../lib/captionText";
+import { useSubtitleFileDrop } from "../../lib/localSubtitles";
+import { useLocalSubtitleStore, videoSubtitleState } from "../../store/useLocalSubtitleStore";
+import { SponsorBlockSkipButton } from "./SponsorBlockSkipButton";
 import { SETTINGS } from "../../lib/settings/schema";
+import { loudnessFactor } from "../../lib/loudness";
+import { useVideoEq } from "../../lib/audio/useVideoEq";
+import { useVolumeLevel } from "../../lib/audio/volumeBoost";
+import { adaptivePlayerAspect, useReportVideoAspect } from "../../lib/adaptivePlayer";
 import { IS_LINUX_RUNTIME } from "../../lib/platform";
+import { videoPlayerKeyAction } from "../../lib/videoPlayerKeys";
+import { IS_MAIN_WINDOW } from "../../lib/appWindow";
+import { useAmbientSettings } from "../../lib/ambient/useAmbientSettings";
+import { AmbientGlow } from "./AmbientGlow";
+import { useUiStore } from "../../store/useUiStore";
+import { SphericalView, type LookAround } from "./SphericalView";
+import type { Projection } from "../../lib/spherical/view";
+import { useLookSpeed } from "../../lib/spherical/useLookSpeed";
 import {
   AUDIO_DRIFT_TOLERANCE_SECONDS,
   AUDIO_RESYNC_MIN_INTERVAL_MS,
@@ -28,6 +90,10 @@ import {
 } from "../../lib/externalAudioSync";
 import { useSubtitleSettingsSync } from "../../lib/useSubtitleSettingsSync";
 import { openPopoutPlayer } from "../../lib/pipHandoff";
+import { sleepTimerTakesEnd } from "../../lib/useSleepTimerDriver";
+import { usePlaybackStartSpeed } from "../../lib/playbackStartSpeed";
+import { VIDEO_FIT_CLASS } from "../../lib/videoFit";
+import { ambientShown } from "../../lib/ambient/ambientShown";
 import {
   formatPlaybackRate,
   normalizePlaybackRate,
@@ -35,14 +101,27 @@ import {
   selectPreferredAudioTrackId,
   selectPreferredCaptionId,
 } from "../../lib/settings/playerRuntime";
+import { hlsAudioChoice } from "../../lib/hlsAudioTrack";
 import { setSettingValue, useAppSettingsStore } from "../../store/useAppSettingsStore";
+import {
+  clearLiveTiming,
+  isAtLiveEdge,
+  liveEdgePosition,
+  liveStallRecoveryTarget,
+  liveTimingFromPlaylist,
+  liveWindow,
+  readLiveTiming,
+  stampLiveTiming,
+} from "../../lib/liveEdge";
 import {
   createWindowFullscreenController,
   watchNativeFullscreen,
   type WindowFullscreenController,
 } from "../../lib/windowFullscreen";
 import {
+  SOURCE_SWITCH_TIMEOUT_MS,
   hasMediaPlaybackProgressed,
+  hasSourceSwitchTimedOut,
   shouldEnterMediaBuffering,
 } from "../../lib/mediaBuffering";
 import {
@@ -72,10 +151,22 @@ type PlayerProps = {
   onRetry?: () => void;
   onCopyLogs?: () => Promise<boolean> | boolean | void;
   onOpenInBrowser?: () => void;
+  /** YouTube's category, once known, for the music at normal speed setting. */
+  category?: string | null;
+  /** Drawn over the video and the controls, such as the Up next card. */
+  overlay?: React.ReactNode;
+  /** A small label on the picture, left out of the mini player. */
+  badge?: React.ReactNode;
   onRetrySource?: (reason: string) => void;
   sourceMode?: string;
   className?: string;
   chapters?: VideoChapter[];
+  heatmap?: HeatmapMarker[];
+  storyboard?: StoryboardLevel[];
+  /** How a 360 video maps onto its sphere; null for a flat one. */
+  projection?: Projection | null;
+  /** How many dB louder than the site's target the video plays. */
+  loudnessDb?: number | null;
 };
 
 type DashBitrateInfo = {
@@ -102,11 +193,14 @@ type DashTrackInfo = {
   labels?: Array<{ text?: string; lang?: string }>;
   roles?: Array<{ value?: string }>;
   audioChannelConfiguration?: Array<{ audioChannelConfiguration?: string }>;
+  bitrateList?: DashVideoTrack["bitrateList"];
+  codec?: string | null;
+  mimeType?: string | null;
   [key: string]: unknown;
 };
 
 type DashPlayerController = {
-  initialize: (element: HTMLMediaElement, source: string, autoPlay: boolean) => void;
+  initialize: (element: HTMLMediaElement, source: string, autoPlay: boolean, startTime?: number) => void;
   destroy: () => void;
   off: (type: string, listener: (event: unknown) => void, scope?: object) => void;
   on: (type: string, listener: (event: unknown) => void, scope?: object) => void;
@@ -114,6 +208,7 @@ type DashPlayerController = {
   getBitrateInfoListFor: (type: string) => DashBitrateInfo[];
   getRepresentationsByType: (type: string) => DashRepresentationInfo[];
   setRepresentationForTypeById: (type: string, id: string, forceReplace?: boolean) => void;
+  setInitialMediaSettingsFor: (type: string, value: { id: string }) => void;
   extend?: (parentNameString: string, childInstance: () => unknown, override: boolean) => void;
   getQualityFor: (type: string) => number;
   getCurrentRepresentationForType: (type: string) => DashRepresentationInfo | null;
@@ -135,7 +230,12 @@ type QualitySwitchSnapshot = {
   targetQualityId: string;
 };
 
+const fastQualitySwitchEnabled = () =>
+  useAppSettingsStore.getState().values[SETTINGS.FAST_QUALITY_SWITCH_ENABLED] === "true";
+
+/** Null with fast switching on: the new quality no longer waits for the buffer to play out. */
 function readBufferedAheadSeconds(player: DashPlayerController): number | null {
+  if (fastQualitySwitchEnabled()) return null;
   try {
     const level = player.getDashMetrics?.()?.getCurrentBufferLevel("video");
     return typeof level === "number" && Number.isFinite(level) ? Math.round(level) : null;
@@ -144,112 +244,22 @@ function readBufferedAheadSeconds(player: DashPlayerController): number | null {
   }
 }
 
+/** One array for every player without chapters. A new `[]` per render restarted the seek bar's effect each time. */
+const NO_CHAPTERS: VideoChapter[] = [];
+// A rounded clip makes WebKitGTK draw every video frame through a mask, so the picture is square there.
+const VIDEO_CORNERS = IS_LINUX_RUNTIME ? "rounded-none" : "rounded-xl";
 const FULLSCREEN_SETTLE_MS = 120;
+/** How long the player's size has to hold before Auto is settled for it. */
+const AUTO_RESIZE_SETTLE_MS = 400;
+/** Video kept behind the playhead. Keeping as much behind as ahead held up to
+ * two extra minutes of 1080p in memory. */
+const BACK_BUFFER_SECONDS = 30;
+/** How often what is further behind than that is dropped. At 120 the buffer held up to 150
+ * seconds behind the playhead between two prunes. */
+const BACK_BUFFER_PRUNE_SECONDS = 30;
 const PLAYER_LOG_MAX_CHARS = 500;
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
-
-type AmbientSample = {
-  top: string;
-  right: string;
-  bottom: string;
-  left: string;
-  center: string;
-  key: string;
-};
-
-const AMBIENT_SAMPLE_WIDTH = 36;
-const AMBIENT_SAMPLE_HEIGHT = 20;
-const AMBIENT_SAMPLE_INTERVAL_MS = 1500;
-// Applied to the sampled colors in place of a CSS saturate() filter, which would
-// re-rasterize the whole window-wide glow layer on every repaint.
-const AMBIENT_SATURATION = 1.5;
-const DEFAULT_AMBIENT_SAMPLE: AmbientSample = {
-  top: "var(--color-player-ambient-1)",
-  right: "var(--color-player-ambient-2)",
-  bottom: "var(--color-player-ambient-1)",
-  left: "var(--color-player-ambient-2)",
-  center: "var(--color-player-ambient-3)",
-  key: "default",
-};
-
-function ambientRgba([r, g, b]: [number, number, number], alpha: number) {
-  const lift = 1.08;
-  const gray = 0.2126 * r + 0.7152 * g + 0.0722 * b;
-  const channel = (value: number) =>
-    Math.round(clamp((gray + (value - gray) * AMBIENT_SATURATION) * lift, 0, 255));
-  return `rgba(${channel(r)}, ${channel(g)}, ${channel(b)}, ${alpha})`;
-}
-
-function sampleRegion(
-  imageData: ImageData,
-  startX: number,
-  startY: number,
-  endX: number,
-  endY: number,
-): [number, number, number] {
-  const { data, width, height } = imageData;
-  const x0 = Math.max(0, Math.min(width - 1, Math.floor(startX)));
-  const y0 = Math.max(0, Math.min(height - 1, Math.floor(startY)));
-  const x1 = Math.max(x0 + 1, Math.min(width, Math.ceil(endX)));
-  const y1 = Math.max(y0 + 1, Math.min(height, Math.ceil(endY)));
-
-  let red = 0;
-  let green = 0;
-  let blue = 0;
-  let totalWeight = 0;
-
-  for (let y = y0; y < y1; y += 1) {
-    for (let x = x0; x < x1; x += 1) {
-      const offset = (y * width + x) * 4;
-      const r = data[offset] ?? 0;
-      const g = data[offset + 1] ?? 0;
-      const b = data[offset + 2] ?? 0;
-      const max = Math.max(r, g, b);
-      const min = Math.min(r, g, b);
-      const saturation = max === 0 ? 0 : (max - min) / max;
-      const luminance = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
-      const weight = (0.2 + saturation * 1.35) * (0.35 + clamp(luminance, 0, 1) * 0.65);
-
-      red += r * weight;
-      green += g * weight;
-      blue += b * weight;
-      totalWeight += weight;
-    }
-  }
-
-  if (totalWeight <= 0) return [10, 10, 10];
-  return [red / totalWeight, green / totalWeight, blue / totalWeight];
-}
-
-function extractAmbientSample(context: CanvasRenderingContext2D): AmbientSample {
-  const imageData = context.getImageData(0, 0, AMBIENT_SAMPLE_WIDTH, AMBIENT_SAMPLE_HEIGHT);
-  const edgeHeight = Math.max(4, Math.floor(AMBIENT_SAMPLE_HEIGHT * 0.32));
-  const edgeWidth = Math.max(6, Math.floor(AMBIENT_SAMPLE_WIDTH * 0.26));
-  const centerX = AMBIENT_SAMPLE_WIDTH * 0.22;
-  const centerY = AMBIENT_SAMPLE_HEIGHT * 0.22;
-  const centerWidth = AMBIENT_SAMPLE_WIDTH * 0.56;
-  const centerHeight = AMBIENT_SAMPLE_HEIGHT * 0.56;
-
-  const top = sampleRegion(imageData, 0, 0, AMBIENT_SAMPLE_WIDTH, edgeHeight);
-  const right = sampleRegion(imageData, AMBIENT_SAMPLE_WIDTH - edgeWidth, 0, AMBIENT_SAMPLE_WIDTH, AMBIENT_SAMPLE_HEIGHT);
-  const bottom = sampleRegion(imageData, 0, AMBIENT_SAMPLE_HEIGHT - edgeHeight, AMBIENT_SAMPLE_WIDTH, AMBIENT_SAMPLE_HEIGHT);
-  const left = sampleRegion(imageData, 0, 0, edgeWidth, AMBIENT_SAMPLE_HEIGHT);
-  const center = sampleRegion(imageData, centerX, centerY, centerX + centerWidth, centerY + centerHeight);
-
-  const key = [top, right, bottom, left, center]
-    .flatMap((color) => color.map((channel) => Math.round(channel / 6) * 6))
-    .join(",");
-
-  return {
-    top: ambientRgba(top, 0.92),
-    right: ambientRgba(right, 0.82),
-    bottom: ambientRgba(bottom, 0.92),
-    left: ambientRgba(left, 0.82),
-    center: ambientRgba(center, 0.5),
-    key,
-  };
-}
 
 function extractCodecMimeType(mimeType?: string | null) {
   if (!mimeType) return null;
@@ -330,10 +340,17 @@ export const Player: React.FC<PlayerProps> = ({
   onRetry,
   onCopyLogs,
   onOpenInBrowser,
+  category,
+  overlay,
+  badge,
   onRetrySource,
   sourceMode,
   className,
-  chapters = [],
+  chapters = NO_CHAPTERS,
+  heatmap,
+  storyboard,
+  projection = null,
+  loudnessDb,
 }) => {
   const [activeQualityLabel, setActiveQualityLabel] = useState<string | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -342,26 +359,22 @@ export const Player: React.FC<PlayerProps> = ({
   const hideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pointerInsideRef = useRef(false);
   const keyboardFocusInsideRef = useRef(false);
-  const sleepTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const skippedSegmentsRef = useRef<Set<string>>(new Set());
+  const sbTrackerRef = useRef(new SponsorBlockTracker());
   const undoSkippedSegmentsRef = useRef<Set<string>>(new Set());
-  const mutedSegmentsRecordedRef = useRef<Set<string>>(new Set());
-  const notifiedSegmentsRef = useRef<Set<string>>(new Set());
   const lastMediaIdentityRef = useRef<string>(src || dashManifestUrl || hlsManifestUrl || "");
   const desiredPlayingRef = useRef(false);
   const pendingResumeTimeRef = useRef(0);
   const sourceSwitchingRef = useRef(false);
   const dashPlayerRef = useRef<DashPlayerController | null>(null);
   const dashReadyRef = useRef(false);
+  // The area Auto was last settled for, so a resize that changes nothing is left alone.
+  const autoBoxRef = useRef<PlayerBox | null>(null);
   const hlsPlayerRef = useRef<Hls | null>(null);
+  const liveSeekedBackRef = useRef(false);
   const qualitySwitchSnapshotRef = useRef<QualitySwitchSnapshot | null>(null);
   const qualitySwitchTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const mediaBufferingRef = useRef(false);
   const bufferingStartedAtRef = useRef<number | null>(null);
-  const seekFeedbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const volumeFeedbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const ambientCanvasRef = useRef<HTMLCanvasElement | null>(null);
-  const ambientSampleKeyRef = useRef(DEFAULT_AMBIENT_SAMPLE.key);
   // Stall watchdog / source-fallback bookkeeping.
   const waitingSinceRef = useRef<number | null>(null);
   const stallCountRef = useRef(0);
@@ -383,30 +396,58 @@ export const Player: React.FC<PlayerProps> = ({
   const attachedAudioIdentityRef = useRef<string | null>(null);
   const videoProgressSampleRef = useRef<{ time: number; at: number } | null>(null);
 
+  // Picked field by field, and never the playback time: a bare `usePlayerStore()` re-rendered
+  // the player, its controls and its menus on every time tick. What needs the time reads the
+  // media element, or subscribes in a leaf of its own.
   const {
     isPlaying,
     setIsPlaying,
     volume,
-    setVolume,
     muted,
     setMuted,
     playbackRate,
     setPlaybackRate,
-    currentTime,
     duration,
     setCurrentTime,
     setDuration,
     playNext,
+    playPrevious,
+    videoFit,
     isTheaterMode,
     setIsTheaterMode,
     sponsorBlockSegments,
     videoPlayerMode,
     enterVideoPip,
     expandVideoPlayer,
-    isVideoFullscreen: isFullscreen,
-    setIsVideoFullscreen: setIsFullscreen,
+    isFullscreen,
+    setIsFullscreen,
     setIsVideoFullscreenTransitioning,
-  } = usePlayerStore();
+  } = usePlayerStore(
+    useShallow((state) => ({
+      isPlaying: state.isPlaying,
+      setIsPlaying: state.setIsPlaying,
+      volume: state.volume,
+      muted: state.muted,
+      setMuted: state.setMuted,
+      playbackRate: state.playbackRate,
+      setPlaybackRate: state.setPlaybackRate,
+      duration: state.duration,
+      setCurrentTime: state.setCurrentTime,
+      setDuration: state.setDuration,
+      playNext: state.playNext,
+      playPrevious: state.playPrevious,
+      videoFit: state.videoFit,
+      isTheaterMode: state.isTheaterMode,
+      setIsTheaterMode: state.setIsTheaterMode,
+      sponsorBlockSegments: state.sponsorBlockSegments,
+      videoPlayerMode: state.videoPlayerMode,
+      enterVideoPip: state.enterVideoPip,
+      expandVideoPlayer: state.expandVideoPlayer,
+      isFullscreen: state.isVideoFullscreen,
+      setIsFullscreen: state.setIsVideoFullscreen,
+      setIsVideoFullscreenTransitioning: state.setIsVideoFullscreenTransitioning,
+    })),
+  );
 
   usePersistedPlayerVolume();
 
@@ -414,13 +455,18 @@ export const Player: React.FC<PlayerProps> = ({
   const autoplayEnabled = useAppSettingsStore((state) => state.values[SETTINGS.AUTOPLAY_ENABLED] !== "false");
   const videoLoopEnabled = useAppSettingsStore((state) => state.values[SETTINGS.VIDEO_LOOP_ENABLED] === "true");
   const rememberPlaybackSpeed = useAppSettingsStore((state) => state.values[SETTINGS.REMEMBER_PLAYBACK_SPEED] === "true");
+  const normalizeLoudness = useAppSettingsStore((state) => state.values[SETTINGS.VIDEO_LOUDNESS_NORMALIZATION] === "true");
+  // The slider keeps showing the chosen volume; only what reaches the element is scaled.
+  const outputVolume = volume * loudnessFactor(loudnessDb, normalizeLoudness);
   const playbackSpeedSetting = useAppSettingsStore((state) => state.values[SETTINGS.PLAYBACK_SPEED] ?? "1.0");
   const customSpeedsEnabled = useAppSettingsStore((state) => state.values[SETTINGS.CUSTOM_SPEEDS_ENABLED] === "true");
   const customSpeedPresets = useAppSettingsStore((state) => state.values[SETTINGS.CUSTOM_SPEED_PRESETS] ?? "");
   const longPressSpeedSetting = useAppSettingsStore((state) => state.values[SETTINGS.LONG_PRESS_PLAYBACK_SPEED] ?? "2.0");
   const speedSliderEnabled = useAppSettingsStore((state) => state.values[SETTINGS.SPEED_SLIDER_ENABLED] === "true");
   const seekIntervalSetting = useAppSettingsStore((state) => state.values[SETTINGS.DOUBLE_TAP_SEEK_SECONDS] ?? "10");
+  const doubleClickSeek = useAppSettingsStore((state) => state.values[SETTINGS.DOUBLE_CLICK_SEEK_ENABLED] !== "false");
   const subtitlesEnabled = useAppSettingsStore((state) => state.values[SETTINGS.SUBTITLES_ENABLED] === "true");
+  const preferredAudioLanguage = useAppSettingsStore((state) => state.values[SETTINGS.PREFERRED_AUDIO_LANGUAGE]);
   const preferredSubtitleLanguage = useAppSettingsStore((state) => state.values[SETTINGS.PREFERRED_SUBTITLE_LANGUAGE] ?? "en");
   // Silences this player while it warms up behind a handoff the other window is
   // still playing out loud; user mute and volume stay untouched.
@@ -440,10 +486,8 @@ export const Player: React.FC<PlayerProps> = ({
     () => normalizePlaybackRate(playbackSpeedSetting),
     [playbackSpeedSetting],
   );
-  const longPressPlaybackRate = useMemo(
-    () => normalizePlaybackRate(longPressSpeedSetting, 2),
-    [longPressSpeedSetting],
-  );
+  const longPressPlaybackRate = useMemo(() => longPressRate(longPressSpeedSetting), [longPressSpeedSetting]);
+  const [isPopOut] = useState(isPopOutWindow);
   const configuredSpeedOptions = useMemo(
     () => parseCustomSpeedPresets(customSpeedPresets, customSpeedsEnabled),
     [customSpeedPresets, customSpeedsEnabled],
@@ -485,14 +529,16 @@ export const Player: React.FC<PlayerProps> = ({
   const [controlsVisible, setControlsVisible] = useState(true);
   const [cursorHidden, setCursorHidden] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const ambientMode = useAppSettingsStore((state) => state.values[SETTINGS.AMBIENT_MODE_ENABLED] !== "false");
-  const [ambientSample, setAmbientSample] = useState<AmbientSample>(DEFAULT_AMBIENT_SAMPLE);
-  const {
-    sponsorBlockEnabled,
-    sponsorBlockActions,
-    incrementStats,
-    loadSettings
-  } = useSettingsStore();
+  const closeSettings = useCallback(() => setSettingsOpen(false), []);
+  const ambient = useAmbientSettings();
+  const { sponsorBlockEnabled, sponsorBlockActions, incrementStats, loadSettings } = useSettingsStore(
+    useShallow((state) => ({
+      sponsorBlockEnabled: state.sponsorBlockEnabled,
+      sponsorBlockActions: state.sponsorBlockActions,
+      incrementStats: state.incrementStats,
+      loadSettings: state.loadSettings,
+    })),
+  );
   const [sbMuted, setSbMuted] = useState(false);
   const [notifyToast, setNotifyToast] = useState<{ segment: any; categoryName: string; visible: boolean } | null>(null);
   const notifyTimeoutRef = useRef<number | null>(null);
@@ -508,16 +554,23 @@ export const Player: React.FC<PlayerProps> = ({
     bufferingStartedAtRef.current = null;
     setIsBuffering(false);
   }, []);
-  const [bufferedPct, setBufferedPct] = useState(0);
-  const [sleepMinutes, setSleepMinutes] = useState(0);
   const [selectedCaptionId, setSelectedCaptionId] = useState<string>("off");
   const [selectedAudioTrackId, setSelectedAudioTrackId] = useState<string | null>(null);
   const [hasStartedPlayback, setHasStartedPlayback] = useState(false);
   const [isSourceSwitching, setIsSourceSwitching] = useState(false);
-  const [seekFeedback, setSeekFeedback] = useState<PlayerSeekFeedback | null>(null);
-  const [volumeFeedback, setVolumeFeedback] = useState<PlayerVolumeFeedback | null>(null);
+  const { feedback: seekFeedback, show: showSeekFeedback } = useSeekFeedback();
+  const { feedback: volumeFeedback, show: showVolumeFeedback } = useVolumeFeedback();
   const [videoCodecUnsupported, setVideoCodecUnsupported] = useState(false);
   const [pendingQualitySwitch, setPendingQualitySwitch] = useState<PendingQualitySwitch | null>(null);
+  const [dashRestartCount, setDashRestartCount] = useState(0);
+  const decodeFallbackPendingRef = useRef(false);
+  const decodeFallbackAtRef = useRef<number | null>(null);
+  const dashStartFamilyRef = useRef<VideoCodecFamily | null>(null);
+
+  const fastQualitySwitch = useAppSettingsStore((s) => s.values[SETTINGS.FAST_QUALITY_SWITCH_ENABLED] === "true");
+  useEffect(() => {
+    dashPlayerRef.current?.updateSettings({ streaming: { buffer: { fastSwitchEnabled: fastQualitySwitch } } });
+  }, [fastQualitySwitch]);
 
   const qualitySwitchPending = pendingQualitySwitch !== null;
   useEffect(() => {
@@ -550,24 +603,36 @@ export const Player: React.FC<PlayerProps> = ({
     return hlsManifestUrl.slice(0, markerIndex + marker.length);
   }, [hlsManifestUrl]);
 
+  const decodeFailures = useCodecHealthStore((state) => state.failures);
+  const currentVideoId = usePlayerStore((state) => state.currentVideo?.id);
+  const subtitleOffsetMs = useLocalSubtitleStore((state) => videoSubtitleState(state.videos, currentVideoId).offsetMs);
   const supportedQualities = useMemo(() => {
     if (!isDashPlayback) return qualities;
-    return qualities.filter((quality) => isVariantSupported(quality.mimeType));
-  }, [isDashPlayback, qualities]);
+    const decodable = qualities.filter((quality) => isVariantSupported(quality.mimeType));
+    const healthy = decodable.filter((quality) => !isCodecRuledOut(decodeFailures, quality.mimeType, currentVideoId));
+    return healthy.some((quality) => quality.isVideoOnly) ? healthy : decodable;
+  }, [currentVideoId, decodeFailures, isDashPlayback, qualities]);
+  const supportedQualitiesRef = useRef(supportedQualities);
+  supportedQualitiesRef.current = supportedQualities;
 
   const selectedQuality = useMemo(() => {
     return (
       supportedQualities.find((quality) => quality.id === selectedQualityId) ||
+      nearestSupportedQuality(qualities.find((quality) => quality.id === selectedQualityId), supportedQualities) ||
       supportedQualities.find((quality) => quality.isDefault) ||
       supportedQualities[0] ||
       null
     );
-  }, [selectedQualityId, supportedQualities]);
+  }, [qualities, selectedQualityId, supportedQualities]);
+  const dashStartChoiceRef = useRef<StreamVariant | null>(null);
+  dashStartChoiceRef.current = selectedQualityId && selectedQualityId !== "auto" ? selectedQuality : null;
 
   const selectedAudioTrack = audioTracks.find((track) => track.id === selectedAudioTrackId)
     || audioTracks.find((track) => track.isDefault)
     || audioTracks[0]
     || null;
+  const selectedAudioTrackRef = useRef(selectedAudioTrack);
+  selectedAudioTrackRef.current = selectedAudioTrack;
 
   const hasSelectedAlternateAudio =
     !!selectedAudioTrackId && !!selectedAudioTrack && !selectedAudioTrack.isDefault;
@@ -578,119 +643,59 @@ export const Player: React.FC<PlayerProps> = ({
     !isHlsPlayback &&
     (hasSelectedAlternateAudio || (!!selectedQuality && !selectedQuality.hasAudio));
 
+  const { level: volumeLevelNow, maxLevel, setLevel: setVolumeLevel, gain: boostGain } = useVolumeLevel();
+  useVideoEq(videoRef, audioRef, usesExternalAudio ? selectedAudioTrack?.localUrl ?? null : null, boostGain);
+  useReportVideoAspect(videoRef, currentVideoId);
+  const adaptiveEnabled = useAppSettingsStore((state) => state.values[SETTINGS.ADAPTIVE_PLAYER_SIZE_ENABLED] !== "false");
+  const videoAspect = usePlayerStore((state) => state.videoAspect);
+
   const isPipMode = videoPlayerMode === "pip";
+  // The viewer's own 360 view choice for this video, or null to follow the stream (Android #1967).
+  const [sphericalChoice, setSphericalChoice] = useState<{ videoId: string | undefined; shown: boolean } | null>(null);
+  const [sphericalUnavailable, setSphericalUnavailable] = useState(false);
+  const sphericalPicked = sphericalChoice && sphericalChoice.videoId === currentVideoId ? sphericalChoice.shown : null;
+  // The small player shows the flat picture, as on Android.
+  const showsSpherical = !isPipMode && !sphericalUnavailable && (sphericalPicked ?? projection !== null);
+  const lookAround = useRef<LookAround | null>(null);
+  const [lookSpeed] = useLookSpeed();
+  const onSphericalUnavailable = useCallback(() => {
+    setSphericalUnavailable(true);
+    useUiStore.getState().showToast({ message: getString("player_spherical_unavailable") });
+  }, []);
+  const sphericalMenu = useMemo(
+    () =>
+      isPipMode
+        ? null
+        : {
+            shown: showsSpherical,
+            onToggle: (shown: boolean) => {
+              setSphericalUnavailable(false);
+              setSphericalChoice({ videoId: currentVideoId, shown });
+            },
+          },
+    [isPipMode, showsSpherical, currentVideoId],
+  );
   const isTheaterSurface = isTheaterMode && !isPipMode;
   const shouldShowControls = controlsVisible || !isPlaying || settingsOpen || isScrubbing;
-  // Never on Linux: WebKitGTK repaints large filtered layers on the CPU, and the
-  // glow sat almost black there because sampling video frames is too costly.
-  // Not in fullscreen either, where the video covers it.
-  const showAmbient = ambientMode && isTheaterSurface && !error && !isFullscreen && !IS_LINUX_RUNTIME;
-  const effectivePoster = hasStartedPlayback || resumeTime > 0 || isSourceSwitching ? undefined : poster || undefined;
-  const ambientBackdropStyle = useMemo<React.CSSProperties>(() => ({
-    background: [
-      // Stops reach further than they did under the old CSS blur, which spread
-      // each color past its stop; a gradient is already soft on its own.
-      `radial-gradient(ellipse at 50% -6%, ${ambientSample.top} 0%, transparent 72%)`,
-      `radial-gradient(ellipse at 50% 106%, ${ambientSample.bottom} 0%, transparent 72%)`,
-      `radial-gradient(ellipse at -6% 50%, ${ambientSample.left} 0%, transparent 68%)`,
-      `radial-gradient(ellipse at 106% 50%, ${ambientSample.right} 0%, transparent 68%)`,
-      `radial-gradient(circle at 50% 50%, ${ambientSample.center} 0%, transparent 60%)`,
-      "linear-gradient(180deg, color-mix(in srgb, var(--color-chrome-black) 88%, transparent) 0%, color-mix(in srgb, var(--color-chrome-black) 50%, transparent) 45%, color-mix(in srgb, var(--color-chrome-black) 88%, transparent) 100%)",
-    ].join(", "),
-  }), [ambientSample]);
-
+  const setIsPlayerChromeShown = usePlayerStore((state) => state.setIsPlayerChromeShown);
   useEffect(() => {
-    if (!showAmbient) {
-      ambientSampleKeyRef.current = DEFAULT_AMBIENT_SAMPLE.key;
-      setAmbientSample(DEFAULT_AMBIENT_SAMPLE);
-      return;
-    }
-
-    const video = videoRef.current;
-    if (!video) return;
-
-    let cancelled = false;
-    let frameHandle: number | null = null;
-    let intervalId: number | null = null;
-    let lastSampleAt = 0;
-    let samplingBlocked = false;
-    const frameVideo = video as {
-      requestVideoFrameCallback?: (callback: () => void) => number;
-      cancelVideoFrameCallback?: (handle: number) => void;
-    };
-
-    const sampleFrame = () => {
-      if (
-        cancelled ||
-        samplingBlocked ||
-        document.hidden ||
-        video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA ||
-        video.videoWidth <= 0 ||
-        video.videoHeight <= 0
-      ) {
-        return;
-      }
-
-      const now = performance.now();
-      if (now - lastSampleAt < AMBIENT_SAMPLE_INTERVAL_MS) return;
-      lastSampleAt = now;
-
-      const canvas = ambientCanvasRef.current ?? document.createElement("canvas");
-      ambientCanvasRef.current = canvas;
-      if (canvas.width !== AMBIENT_SAMPLE_WIDTH) canvas.width = AMBIENT_SAMPLE_WIDTH;
-      if (canvas.height !== AMBIENT_SAMPLE_HEIGHT) canvas.height = AMBIENT_SAMPLE_HEIGHT;
-
-      const context = canvas.getContext("2d", { willReadFrequently: true });
-      if (!context) return;
-
-      try {
-        context.drawImage(video, 0, 0, AMBIENT_SAMPLE_WIDTH, AMBIENT_SAMPLE_HEIGHT);
-        const nextSample = extractAmbientSample(context);
-        if (nextSample.key !== ambientSampleKeyRef.current) {
-          ambientSampleKeyRef.current = nextSample.key;
-          setAmbientSample(nextSample);
-        }
-      } catch (error) {
-        samplingBlocked = true;
-        ambientSampleKeyRef.current = DEFAULT_AMBIENT_SAMPLE.key;
-        setAmbientSample(DEFAULT_AMBIENT_SAMPLE);
-        console.warn("Video ambient sampling unavailable; using neutral backdrop", error);
-      }
-    };
-
-    const scheduleNextFrame = () => {
-      if (!frameVideo.requestVideoFrameCallback || cancelled) return;
-      frameHandle = frameVideo.requestVideoFrameCallback(() => {
-        sampleFrame();
-        scheduleNextFrame();
-      });
-    };
-
-    sampleFrame();
-    if (frameVideo.requestVideoFrameCallback) {
-      scheduleNextFrame();
-    } else {
-      // requestVideoFrameCallback only fires for new frames; a timer has to
-      // skip a paused video itself.
-      intervalId = window.setInterval(() => {
-        if (!video.paused) sampleFrame();
-      }, AMBIENT_SAMPLE_INTERVAL_MS);
-    }
-
-    video.addEventListener("loadeddata", sampleFrame);
-    video.addEventListener("seeked", sampleFrame);
-    video.addEventListener("play", sampleFrame);
-
-    return () => {
-      cancelled = true;
-      video.removeEventListener("loadeddata", sampleFrame);
-      video.removeEventListener("seeked", sampleFrame);
-      video.removeEventListener("play", sampleFrame);
-      if (intervalId !== null) window.clearInterval(intervalId);
-      if (frameHandle !== null) frameVideo.cancelVideoFrameCallback?.(frameHandle);
-    };
-  }, [dashManifestUrl, hlsManifestUrl, showAmbient, src]);
-
+    setIsPlayerChromeShown(shouldShowControls);
+  }, [shouldShowControls, setIsPlayerChromeShown]);
+  // The pop-out holds a window of its own, with no page around the video to light.
+  const showAmbient = ambientShown({
+    enabled: ambient.enabled,
+    glow: ambient.glow,
+    theater: isTheaterSurface,
+    videoFit,
+    blocked: !IS_MAIN_WINDOW || isPipMode || isFullscreen || Boolean(error) || showsSpherical,
+  });
+  const ambientSpreadShown = showAmbient && ambient.glow;
+  const setIsAmbientSpreadShown = usePlayerStore((state) => state.setIsAmbientSpreadShown);
+  useEffect(() => {
+    setIsAmbientSpreadShown(ambientSpreadShown);
+    return () => setIsAmbientSpreadShown(false);
+  }, [ambientSpreadShown, setIsAmbientSpreadShown]);
+  const effectivePoster = hasStartedPlayback || resumeTime > 0 || isSourceSwitching ? undefined : poster || undefined;
   const logPlayerEvent = useCallback((event: string, payload: Record<string, unknown> = {}) => {
     const entry = formatPlayerLogPayload({
       currentTime: videoRef.current?.currentTime,
@@ -721,7 +726,29 @@ export const Player: React.FC<PlayerProps> = ({
     const video = videoRef.current;
     if (!player || !video || !dashReadyRef.current) return;
 
+    const videoTracks = withoutRuledOutCodecs(
+      player.getTracksFor?.("video") ?? [],
+      useCodecHealthStore.getState().failures,
+      usePlayerStore.getState().currentVideo?.id,
+    );
+
     if (selectedQualityId === "auto") {
+      const currentRep = player.getCurrentRepresentationForType("video");
+      // Auto climbs as far as fills the player and no further: a picture decoded larger than
+      // it is shown costs decoding, memory and network for nothing.
+      const box = autoQualityBox(video.clientWidth, video.clientHeight, window.devicePixelRatio || 1, IS_LINUX_RUNTIME);
+      const autoTrack = settleAutoVideoTrack(
+        videoTracks,
+        useAppSettingsStore.getState().values[SETTINGS.DEFAULT_VIDEO_CODEC] ?? "H.264",
+        box,
+        currentRep ? String(currentRep.id) : null,
+      );
+      const maxKbps = autoBitrateCapKbps(autoTrack, box);
+      autoBoxRef.current = box;
+      const autoStart = autoRepresentationToSwitchTo(autoTrack, currentRep);
+      if (autoStart) {
+        player.setRepresentationForTypeById("video", autoStart, false);
+      }
       player.updateSettings({
         streaming: {
           abr: {
@@ -729,23 +756,28 @@ export const Player: React.FC<PlayerProps> = ({
               video: true,
               audio: false,
             },
+            maxBitrate: { video: maxKbps },
           },
         },
       });
       logPlayerEvent("dash-quality-auto-requested", {
         switchTime: video.currentTime,
+        autoTrack: autoTrack?.id,
+        // Scalars: the saved log keeps no objects.
+        fillWidth: box?.width,
+        fillHeight: box?.height,
+        maxKbps,
       });
 
-      const currentRep = player.getCurrentRepresentationForType("video");
       if (currentRep && currentRep.height) {
-        setActiveQualityLabel(`${currentRep.height}p`);
+        setActiveQualityLabel(representationLabel(currentRep, supportedQualitiesRef.current));
       }
       return;
     }
 
     if (!selectedQuality) return;
 
-    const representations = player.getRepresentationsByType("video") || [];
+    const representations: DashRepresentationInfo[] = allVideoRepresentations(videoTracks);
     const targetRepresentation = representations.find((representation) => representation.id === selectedQuality.id)
       || representations
         .filter((representation) => typeof representation.height === "number")
@@ -774,11 +806,12 @@ export const Player: React.FC<PlayerProps> = ({
               video: false,
               audio: false,
             },
+            maxBitrate: { video: -1 },
           },
         },
       });
       if (currentRepresentation.height) {
-        setActiveQualityLabel(`${currentRepresentation.height}p`);
+        setActiveQualityLabel(representationLabel(currentRepresentation, supportedQualitiesRef.current));
       }
       logPlayerEvent("dash-quality-already-selected", {
         targetRepresentationId: targetRepresentation.id,
@@ -793,7 +826,7 @@ export const Player: React.FC<PlayerProps> = ({
       targetQualityId: targetRepresentation.id,
     };
     setPendingQualitySwitch({
-      label: targetRepresentation.height ? `${targetRepresentation.height}p` : selectedQuality.qualityLabel,
+      label: representationLabelWithCodec(targetRepresentation, supportedQualitiesRef.current, selectedQuality.qualityLabel),
       etaSeconds: readBufferedAheadSeconds(player),
     });
     if (qualitySwitchTimeoutRef.current) {
@@ -817,6 +850,8 @@ export const Player: React.FC<PlayerProps> = ({
               video: false,
               audio: false,
             },
+            // A chosen quality is never held to the player's size.
+            maxBitrate: { video: -1 },
           },
         },
       });
@@ -846,6 +881,59 @@ export const Player: React.FC<PlayerProps> = ({
     });
   }, [logPlayerEvent, selectedQuality, selectedQualityId]);
   const applyDashQualitySelectionRef = useRef(applyDashQualitySelection);
+
+  // Fullscreen, theater mode, the mini player and a resized window change what fills the
+  // player, so Auto is settled again once the size holds still.
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video || !isDashPlayback || selectedQualityId !== "auto" || typeof ResizeObserver === "undefined") return;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const observer = new ResizeObserver(() => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => {
+        const box = autoQualityBox(video.clientWidth, video.clientHeight, window.devicePixelRatio || 1, IS_LINUX_RUNTIME);
+        const applied = autoBoxRef.current;
+        if (box?.width === applied?.width && box?.height === applied?.height) return;
+        applyDashQualitySelectionRef.current();
+      }, AUTO_RESIZE_SETTLE_MS);
+    });
+    observer.observe(video);
+    return () => {
+      if (timer) clearTimeout(timer);
+      observer.disconnect();
+    };
+  }, [isDashPlayback, selectedQualityId]);
+
+  // Re-resolving would fetch the same codec and fail again, then wait out a source switch.
+  const leaveFailingCodec = useCallback((reason: "decode-error" | "no-picture" = "decode-error") => {
+    if (decodeFallbackPendingRef.current) return true;
+    const player = dashPlayerRef.current;
+    const video = videoRef.current;
+    const videoId = usePlayerStore.getState().currentVideo?.id;
+    if (!player || !video || !videoId || !Number.isFinite(video.duration)) return false;
+
+    const current = player.getCurrentRepresentationForType("video");
+    const codec = current?.codecs ?? current?.mimeType;
+    const family =
+      reason === "no-picture"
+        ? codecToLeaveWhenNoPicture(codec, supportedQualitiesRef.current, useCodecHealthStore.getState().failures, videoId)
+        : codecToLeaveAfterDecodeError(codec, supportedQualitiesRef.current);
+    if (!family) return false;
+
+    const directStart = dashStartFamilyRef.current === null || dashStartFamilyRef.current === family;
+    logPlayerEventRef.current(reason === "no-picture" ? "video-no-picture-fallback" : "dash-decode-fallback", {
+      family,
+      directStart,
+      resumeAt: video.currentTime,
+    });
+    decodeFallbackPendingRef.current = true;
+    decodeFallbackAtRef.current = video.currentTime;
+    useCodecHealthStore.getState().recordFailure(family, videoId, directStart);
+    setDashRestartCount((count) => count + 1);
+    return true;
+  }, []);
+  const leaveFailingCodecRef = useRef(leaveFailingCodec);
+  leaveFailingCodecRef.current = leaveFailingCodec;
 
   const applyDashAudioSelection = useCallback(() => {
     const player = dashPlayerRef.current;
@@ -936,29 +1024,32 @@ export const Player: React.FC<PlayerProps> = ({
   }, [loadSettings]);
 
   const mediaIdentity = src || dashManifestUrl || hlsManifestUrl || "";
-  const appliedInitialRateForRef = useRef<string | null>(null);
-
-  useEffect(() => {
-    if (!mediaIdentity || appliedInitialRateForRef.current === mediaIdentity) return;
-    appliedInitialRateForRef.current = mediaIdentity;
-    setPlaybackRate(defaultPlaybackRate);
-  }, [defaultPlaybackRate, mediaIdentity, setPlaybackRate]);
+  const [manualSegment, setManualSegment] = useManualSponsorSegment(mediaIdentity, sponsorBlockEnabled);
+  const notePickedSpeed = usePlaybackStartSpeed(mediaIdentity, defaultPlaybackRate, category);
 
   const selectPlaybackRate = useCallback((nextRate: number) => {
     const normalizedRate = normalizePlaybackRate(nextRate);
     setPlaybackRate(normalizedRate);
+    notePickedSpeed(normalizedRate);
     if (rememberPlaybackSpeed) {
       void setSettingValue(SETTINGS.PLAYBACK_SPEED, formatPlaybackRate(normalizedRate));
     }
-  }, [rememberPlaybackSpeed, setPlaybackRate]);
+  }, [notePickedSpeed, rememberPlaybackSpeed, setPlaybackRate]);
 
   const toggleLoopSetting = useCallback(() => {
     void setSettingValue(SETTINGS.VIDEO_LOOP_ENABLED, String(!videoLoopEnabled));
   }, [videoLoopEnabled]);
 
   useSubtitleSettingsSync();
+  useSubtitleFileDrop(containerRef, currentVideoId);
 
   useEffect(() => {
+    // A file added for this video is what the viewer wants, whatever the switch in Settings says.
+    const added = captions.find(isLocalCaption);
+    if (added) {
+      setSelectedCaptionId(added.id);
+      return;
+    }
     if (!subtitlesEnabled) {
       setSelectedCaptionId("off");
       return;
@@ -969,8 +1060,8 @@ export const Player: React.FC<PlayerProps> = ({
   }, [captions, preferredSubtitleLanguage, subtitlesEnabled]);
 
   useEffect(() => {
-    setSelectedAudioTrackId(selectPreferredAudioTrackId(audioTracks, "original"));
-  }, [audioTracks]);
+    setSelectedAudioTrackId(selectPreferredAudioTrackId(audioTracks, preferredAudioLanguage ?? "original"));
+  }, [audioTracks, preferredAudioLanguage]);
 
   useEffect(() => {
     const video = videoRef.current;
@@ -981,12 +1072,6 @@ export const Player: React.FC<PlayerProps> = ({
     return () => {
       if (notifyTimeoutRef.current !== null) {
         window.clearTimeout(notifyTimeoutRef.current);
-      }
-      if (seekFeedbackTimerRef.current) {
-        clearTimeout(seekFeedbackTimerRef.current);
-      }
-      if (volumeFeedbackTimerRef.current) {
-        clearTimeout(volumeFeedbackTimerRef.current);
       }
       if (hideTimerRef.current) {
         clearTimeout(hideTimerRef.current);
@@ -1011,6 +1096,11 @@ export const Player: React.FC<PlayerProps> = ({
     logPlayerEventRef.current = logPlayerEvent;
   }, [logPlayerEvent]);
 
+  const resumeTimeRef = useRef(resumeTime);
+  useEffect(() => {
+    resumeTimeRef.current = resumeTime;
+  }, [resumeTime]);
+
   useEffect(() => {
     onRetrySourceRef.current = onRetrySource;
   }, [onRetrySource]);
@@ -1020,6 +1110,10 @@ export const Player: React.FC<PlayerProps> = ({
     retrySourceFiredRef.current = true;
     logPlayerEventRef.current("source-mode-fallback", { reason, sourceMode });
     onRetrySourceRef.current?.(reason);
+  }, [sourceMode]);
+  const sourceModeRef = useRef(sourceMode);
+  useEffect(() => {
+    sourceModeRef.current = sourceMode;
   }, [sourceMode]);
   const fireRetrySourceRef = useRef(fireRetrySource);
   useEffect(() => {
@@ -1064,6 +1158,11 @@ export const Player: React.FC<PlayerProps> = ({
         return;
       }
       if (video.currentTime - codecProbeBaselineRef.current >= CODEC_PROBE_SECONDS) {
+        // Another codec in the manifest may decode where this one can't; the banner is for when none is left.
+        if (leaveFailingCodecRef.current("no-picture")) {
+          codecProbeBaselineRef.current = null;
+          return;
+        }
         logPlayerEventRef.current("video-codec-unsupported", {
           currentTime: video.currentTime,
           readyState: video.readyState,
@@ -1127,7 +1226,6 @@ export const Player: React.FC<PlayerProps> = ({
     isPlaying,
     settingsOpen,
     isScrubbing,
-    isPipMode,
     isLoading,
     hasError: Boolean(error || errorInfo),
   });
@@ -1186,31 +1284,37 @@ export const Player: React.FC<PlayerProps> = ({
     revealControls();
   }, [revealControls]);
 
-  const showSeekFeedback = useCallback((direction: PlayerSeekFeedback["direction"], seconds: number) => {
-    setSeekFeedback({
-      id: Date.now(),
-      direction,
-      seconds,
-    });
-    if (seekFeedbackTimerRef.current) clearTimeout(seekFeedbackTimerRef.current);
-    seekFeedbackTimerRef.current = setTimeout(() => {
-      setSeekFeedback(null);
-    }, 1200);
-  }, []);
+  // Stats and Recap count a segment once per video, however often a rewind brings it back.
+  const recordSponsorSkip = useCallback((segment: SponsorBlockSegment) => {
+    if (!sbTrackerRef.current.countsOnce(segment.UUID)) return;
+    const [start, end] = segment.segment;
+    void incrementStats(segment.category as SponsorBlockCategory, Math.max(0, end - start));
+    recapSponsorSkip(usePlayerStore.getState().currentVideo ?? {}, segment.category, Math.max(0, end - start) * 1000);
+  }, [incrementStats]);
 
-  const showVolumeFeedback = useCallback((nextVolume: number, nextMuted: boolean) => {
-    setVolumeFeedback({ id: Date.now(), volume: nextVolume, muted: nextMuted });
-    if (volumeFeedbackTimerRef.current) clearTimeout(volumeFeedbackTimerRef.current);
-    volumeFeedbackTimerRef.current = setTimeout(() => {
-      setVolumeFeedback(null);
-    }, 1200);
-  }, []);
+  // A seek let go of inside a segment that skips automatically lands at its end, as on Android.
+  const sponsorSkipTarget = useCallback((time: number): number | null => {
+    if (!sponsorBlockEnabled || isLive || isScrubbing) return null;
+    const segment = sbTrackerRef.current.skipForSeek(time, sponsorBlockSegments, sponsorBlockActions);
+    if (!segment) return null;
+    recordSponsorSkip(segment);
+    return segment.segment[1];
+  }, [sponsorBlockEnabled, isLive, isScrubbing, sponsorBlockSegments, sponsorBlockActions, recordSponsorSkip]);
 
   const seekTo = useCallback((time: number) => {
     const video = videoRef.current;
     const audio = audioRef.current;
     if (!video) return;
-    const nextTime = Math.min(Math.max(time, 0), video.duration || duration || 0);
+    let nextTime: number;
+    if (isLive && video.seekable.length) {
+      const { start, end } = liveWindow(video);
+      nextTime = Math.min(Math.max(time, start), end);
+      liveSeekedBackRef.current = !isAtLiveEdge(nextTime, end, readLiveTiming(video));
+    } else {
+      const dur = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : duration || 0;
+      nextTime = dur > 0 ? Math.min(Math.max(time, 0), dur) : Math.max(time, 0);
+      nextTime = sponsorSkipTarget(nextTime) ?? nextTime;
+    }
     video.currentTime = nextTime;
     if (audio) {
       audioHoldRef.current = false;
@@ -1221,12 +1325,26 @@ export const Player: React.FC<PlayerProps> = ({
       }
     }
     setCurrentTime(nextTime);
-  }, [duration, setCurrentTime]);
+  }, [duration, isLive, setCurrentTime, sponsorSkipTarget]);
+
+  // Letting go of the seek bar inside such a segment skips it too.
+  const wasScrubbingRef = useRef(false);
+  useEffect(() => {
+    const released = wasScrubbingRef.current && !isScrubbing;
+    wasScrubbingRef.current = isScrubbing;
+    const video = videoRef.current;
+    if (released && video) {
+      const target = sponsorSkipTarget(video.currentTime);
+      if (target !== null) seekTo(target);
+    }
+  }, [isScrubbing, sponsorSkipTarget, seekTo]);
 
   const seekBy = useCallback((delta: number) => {
-    seekTo(currentTime + delta);
+    const video = videoRef.current;
+    const baseTime = video ? video.currentTime : usePlayerStore.getState().currentTime;
+    seekTo(baseTime + delta);
     showSeekFeedback(delta > 0 ? "forward" : "backward", Math.abs(delta));
-  }, [currentTime, seekTo, showSeekFeedback]);
+  }, [seekTo, showSeekFeedback]);
 
 
   useEffect(() => {
@@ -1304,7 +1422,7 @@ export const Player: React.FC<PlayerProps> = ({
   const jumpChapter = useCallback((direction: 1 | -1) => {
     if (chapters.length === 0) return;
     const video = videoRef.current;
-    const time = video?.currentTime ?? currentTime;
+    const time = video?.currentTime ?? usePlayerStore.getState().currentTime;
     if (direction === 1) {
       const next = chapters.find((chapter) => chapter.startSeconds > time + 0.5);
       seekTo(next ? next.startSeconds : video?.duration ?? duration);
@@ -1312,7 +1430,7 @@ export const Player: React.FC<PlayerProps> = ({
     }
     const passed = chapters.filter((chapter) => chapter.startSeconds < time - 2);
     seekTo(passed.length > 0 ? passed[passed.length - 1]!.startSeconds : 0);
-  }, [chapters, currentTime, duration, seekTo]);
+  }, [chapters, duration, seekTo]);
 
   const windowFullscreenControllerRef = useRef<WindowFullscreenController | null>(null);
   if (!windowFullscreenControllerRef.current) {
@@ -1391,17 +1509,6 @@ export const Player: React.FC<PlayerProps> = ({
     syncNativeFullscreen,
     videoPlayerMode,
   ]);
-
-  const updateBuffered = useCallback(() => {
-    const video = videoRef.current;
-    if (!video || !Number.isFinite(video.duration) || video.duration <= 0 || video.buffered.length === 0) {
-      setBufferedPct(0);
-      return;
-    }
-
-    const bufferedEnd = video.buffered.end(video.buffered.length - 1);
-    setBufferedPct(Math.min(100, (bufferedEnd / video.duration) * 100));
-  }, []);
 
   const realignExternalAudioClock = useCallback(
     (audio: HTMLAudioElement, video: HTMLVideoElement, force: boolean) => {
@@ -1534,6 +1641,8 @@ export const Player: React.FC<PlayerProps> = ({
     }
 
     dashReadyRef.current = false;
+    decodeFallbackPendingRef.current = false;
+    dashStartFamilyRef.current = null;
     const player = dashjs.MediaPlayer().create() as unknown as DashPlayerController;
     if (dashProxyPrefix) {
       player.extend?.("RequestModifier", () => ({
@@ -1551,6 +1660,12 @@ export const Player: React.FC<PlayerProps> = ({
         capabilities: {
           useMediaCapabilitiesApi: false,
         },
+        // Its default picks the set with the fewest bits per pixel, usually AV1, however the
+        // manifest is ordered. The first set is H.264, the one every platform decodes.
+        selectionModeForInitialTrack: "firstTrack",
+        // dash.js otherwise keeps these in localStorage, which every profile shares.
+        lastBitrateCachingInfo: { enabled: false },
+        lastMediaSettingsCachingInfo: { enabled: false },
         abr: {
           autoSwitchBitrate: {
             video: false,
@@ -1558,9 +1673,10 @@ export const Player: React.FC<PlayerProps> = ({
           },
         },
         buffer: {
-          fastSwitchEnabled: false,
-          bufferToKeep: Math.max(60, bufferConfig.maxSeconds),
-          bufferPruningInterval: 120,
+          fastSwitchEnabled: fastQualitySwitchEnabled(),
+          ...webkitGtkBufferSettings(),
+          bufferToKeep: BACK_BUFFER_SECONDS,
+          bufferPruningInterval: BACK_BUFFER_PRUNE_SECONDS,
           bufferTimeDefault: bufferConfig.minSeconds,
           bufferTimeAtTopQuality: bufferConfig.maxSeconds,
           bufferTimeAtTopQualityLongForm: bufferConfig.maxSeconds,
@@ -1574,6 +1690,27 @@ export const Player: React.FC<PlayerProps> = ({
     });
 
     const dashEvents = dashjs.MediaPlayer.events;
+    // STREAM_INITIALIZED is too late for this: the first segment has already been requested.
+    const onManifestLoaded = (event: unknown) => {
+      const speedKbps = readMeasuredSpeedKbps();
+      const start = pickDashStart({
+        selected: dashStartChoiceRef.current,
+        tracks: withoutRuledOutCodecs(
+          manifestVideoTracks((event as { data?: unknown } | null)?.data)
+            .filter((track) => isVariantSupported(track.codec)),
+          useCodecHealthStore.getState().failures,
+          usePlayerStore.getState().currentVideo?.id,
+        ),
+        preferredCodec: useAppSettingsStore.getState().values[SETTINGS.DEFAULT_VIDEO_CODEC] ?? "H.264",
+        speedKbps,
+        box: autoQualityBox(video.clientWidth, video.clientHeight, window.devicePixelRatio || 1, IS_LINUX_RUNTIME),
+      });
+      if (start.bitrateKbps) {
+        player.updateSettings({ streaming: { abr: { initialBitrate: { video: start.bitrateKbps } } } });
+      }
+      if (start.setId) player.setInitialMediaSettingsFor("video", { id: start.setId });
+      logPlayerEventRef.current("dash-start-quality", { ...start, speedKbps });
+    };
     const onPlaybackWaiting = () => {
       logPlayerEventRef.current("dash-playback-waiting", {
         readyState: video.readyState,
@@ -1597,7 +1734,7 @@ export const Player: React.FC<PlayerProps> = ({
 
       const currentRep = player.getCurrentRepresentationForType("video");
       if (currentRep && currentRep.height) {
-        setActiveQualityLabel(`${currentRep.height}p`);
+        setActiveQualityLabel(representationLabel(currentRep, supportedQualitiesRef.current));
       }
       setPendingQualitySwitch(null);
 
@@ -1653,22 +1790,30 @@ export const Player: React.FC<PlayerProps> = ({
       }
       return { label: "dash-unknown", fatal: false };
     };
+    const onFragmentLoaded = (event: unknown) => {
+      if (measuresConnectionSpeed(sourceModeRef.current)) recordVideoSegmentSpeed(event);
+    };
     const onPlaybackError = (event: unknown) => {
       const { label, fatal } = classifyDashError(event);
-      logPlayerEventRef.current("dash-playback-error", { event, errorClass: label, fatal });
+      logPlayerEventRef.current("dash-playback-error", { ...dashErrorDetails(event), errorClass: label, fatal });
+      if (label === "media-decode" && leaveFailingCodecRef.current()) return;
       if (fatal) fireRetrySourceRef.current(`dash:${label}`);
     };
     const onDashError = (event: unknown) => {
       const { label, fatal } = classifyDashError(event);
-      logPlayerEventRef.current("dash-error", { event, errorClass: label, fatal });
+      logPlayerEventRef.current("dash-error", { ...dashErrorDetails(event), errorClass: label, fatal });
+      if (label === "media-decode" && leaveFailingCodecRef.current()) return;
       if (fatal) fireRetrySourceRef.current(`dash:${label}`);
     };
     const onCapabilitiesDrop = (event: unknown) => {
       logPlayerEventRef.current("dash-capabilities-dropped", { event });
-      fireRetrySourceRef.current("dash:capabilities-dropped");
+      // A machine without AV1 or VP9 still has the other sets, so only the last one is a failure.
+      if (droppedLastAdaptationSet(event)) fireRetrySourceRef.current("dash:capabilities-dropped");
     };
     const onStreamInitialized = () => {
       dashReadyRef.current = true;
+      const startRepresentation = player.getCurrentRepresentationForType("video");
+      dashStartFamilyRef.current = codecFamily(startRepresentation?.codecs ?? startRepresentation?.mimeType);
       logPlayerEventRef.current("dash-stream-initialized", {
         representations: player.getRepresentationsByType("video").map((representation) => ({
           id: representation.id,
@@ -1684,10 +1829,12 @@ export const Player: React.FC<PlayerProps> = ({
 
       const currentRep = player.getCurrentRepresentationForType("video");
       if (currentRep && currentRep.height) {
-        setActiveQualityLabel(`${currentRep.height}p`);
+        setActiveQualityLabel(representationLabel(currentRep, supportedQualitiesRef.current));
       }
     };
 
+    player.on(dashEvents.MANIFEST_LOADED, onManifestLoaded);
+    player.on(dashEvents.FRAGMENT_LOADING_COMPLETED, onFragmentLoaded);
     player.on(dashEvents.PLAYBACK_WAITING, onPlaybackWaiting);
     player.on(dashEvents.BUFFER_LEVEL_STATE_CHANGED, onBufferStateChanged);
     player.on(dashEvents.QUALITY_CHANGE_REQUESTED, onQualityChangeRequested);
@@ -1698,10 +1845,15 @@ export const Player: React.FC<PlayerProps> = ({
     player.on(dashEvents.STREAM_INITIALIZED, onStreamInitialized);
 
     dashPlayerRef.current = player;
-    player.initialize(video, dashManifestUrl, desiredPlayingRef.current || isPlaying);
+    // Starting at 0 and seeking once loaded fetched the opening segments first.
+    const startAt = decodeFallbackAtRef.current ?? resumeTimeRef.current;
+    decodeFallbackAtRef.current = null;
+    player.initialize(video, dashManifestUrl, desiredPlayingRef.current || isPlaying, startAt > 0 ? startAt : undefined);
 
     return () => {
       dashReadyRef.current = false;
+      player.off(dashEvents.MANIFEST_LOADED, onManifestLoaded);
+      player.off(dashEvents.FRAGMENT_LOADING_COMPLETED, onFragmentLoaded);
       player.off(dashEvents.PLAYBACK_WAITING, onPlaybackWaiting);
       player.off(dashEvents.BUFFER_LEVEL_STATE_CHANGED, onBufferStateChanged);
       player.off(dashEvents.QUALITY_CHANGE_REQUESTED, onQualityChangeRequested);
@@ -1714,12 +1866,16 @@ export const Player: React.FC<PlayerProps> = ({
         clearTimeout(qualitySwitchTimeoutRef.current);
         qualitySwitchTimeoutRef.current = null;
       }
+      // A snapshot left from the previous manifest would "correct" the next
+      // video back to the old one's position.
+      qualitySwitchSnapshotRef.current = null;
+      setPendingQualitySwitch(null);
       player.destroy();
       if (dashPlayerRef.current === player) {
         dashPlayerRef.current = null;
       }
     };
-  }, [bufferConfig, dashManifestUrl, dashProxyPrefix, isDashPlayback]);
+  }, [bufferConfig, dashManifestUrl, dashProxyPrefix, dashRestartCount, isDashPlayback]);
 
   useEffect(() => {
     const video = videoRef.current;
@@ -1750,34 +1906,42 @@ export const Player: React.FC<PlayerProps> = ({
       }
     }
 
+    // hls.js picks its first track inside its own manifest handling, before any listener here runs.
+    const audioLanguage = selectedAudioTrackRef.current?.languageCode;
     const hls = new Hls({
+      audioPreference: audioLanguage ? { lang: audioLanguage } : undefined,
       enableWorker: true,
       lowLatencyMode: false,
       maxBufferLength: bufferConfig.maxSeconds,
       maxMaxBufferLength: bufferConfig.maxSeconds,
       backBufferLength: Math.max(30, bufferConfig.maxSeconds),
-      liveSyncDurationCount: 4,
-      liveMaxLatencyDurationCount: 12,
+      liveBackBufferLength: null,
+      liveSyncDurationCount: 3,
+      liveMaxLatencyDurationCount: Infinity,
       liveDurationInfinity: isLive,
       loader: ProxyLoader as unknown as typeof Hls.DefaultConfig.loader,
     });
     hlsPlayerRef.current = hls;
+    liveSeekedBackRef.current = false;
     let fatalRecoveryAttempts = 0;
     let destroyedAfterFatal = false;
 
     hls.on(Hls.Events.MANIFEST_PARSED, () => {
       fatalRecoveryAttempts = 0;
       logPlayerEventRef.current("hls-manifest-parsed", { levels: hls.levels.length });
+      const audioChoice = hlsAudioChoice(hls.allAudioTracks, selectedAudioTrackRef.current);
+      if (audioChoice) hls.setAudioOption(audioChoice);
       if (desiredPlayingRef.current) void video.play().catch(() => {});
     });
     hls.on(Hls.Events.FRAG_LOADED, () => {
       fatalRecoveryAttempts = 0;
     });
-    hls.on(Hls.Events.FRAG_CHANGED, (_event, data) => {
-      const frag = data?.frag;
-      if (!frag || !Number.isFinite(frag.sn as number) || !(frag.duration > 0)) return;
-      const offset = (frag.sn as number) * frag.duration - frag.start;
-      if (Number.isFinite(offset)) video.dataset.liveOffset = String(offset);
+    hls.on(Hls.Events.AUDIO_TRACK_SWITCHED, (_event, data) => {
+      const track = hls.audioTracks[data.id];
+      logPlayerEventRef.current("hls-audio-track", { name: track?.name, lang: track?.lang, groupId: track?.groupId });
+    });
+    hls.on(Hls.Events.LEVEL_UPDATED, (_event, data) => {
+      if (isLive) stampLiveTiming(video, liveTimingFromPlaylist(hls.targetLatency, data.details.targetduration));
     });
     hls.on(Hls.Events.ERROR, (_event, data) => {
       logPlayerEventRef.current("hls-error", {
@@ -1787,15 +1951,13 @@ export const Player: React.FC<PlayerProps> = ({
       });
       if (!data.fatal) {
         if (isLive && data.details === Hls.ErrorDetails.BUFFER_STALLED_ERROR) {
-          const syncPos = hls.liveSyncPosition;
-          const seekable = video.seekable;
-          const target =
-            syncPos != null && Number.isFinite(syncPos)
-              ? syncPos
-              : seekable.length
-                ? seekable.end(seekable.length - 1) - 4
-                : null;
-          if (target != null && Number.isFinite(target) && target > video.currentTime) {
+          const target = liveStallRecoveryTarget({
+            position: video.currentTime,
+            window: liveWindow(video),
+            syncPosition: hls.liveSyncPosition,
+            seekedBack: liveSeekedBackRef.current,
+          });
+          if (target !== null) {
             video.currentTime = target;
             if (desiredPlayingRef.current) void video.play().catch(() => {});
           }
@@ -1833,8 +1995,16 @@ export const Player: React.FC<PlayerProps> = ({
     return () => {
       if (!destroyedAfterFatal) hls.destroy();
       if (hlsPlayerRef.current === hls) hlsPlayerRef.current = null;
+      clearLiveTiming(video);
     };
   }, [bufferConfig, hlsManifestUrl, hlsProxyPrefix, isHlsPlayback, isLive]);
+
+  useEffect(() => {
+    const hls = hlsPlayerRef.current;
+    if (!hls || hls.allAudioTracks.length === 0) return;
+    const choice = hlsAudioChoice(hls.allAudioTracks, selectedAudioTrackRef.current);
+    if (choice) hls.setAudioOption(choice);
+  }, [selectedAudioTrack?.id]);
 
   useEffect(() => {
     if (!isDashPlayback) return;
@@ -1945,6 +2115,7 @@ export const Player: React.FC<PlayerProps> = ({
           message: video.error.message,
         } : null,
       });
+      if ((code === 3 || code === 4) && leaveFailingCodecRef.current()) return;
       if (code && code !== 1) {
         fireRetrySourceRef.current(`media-error:${code}`);
       }
@@ -1982,11 +2153,11 @@ export const Player: React.FC<PlayerProps> = ({
     const targetTime = Math.max(0, resumeTime || 0);
 
     pendingResumeTimeRef.current = targetTime;
-    skippedSegmentsRef.current.clear();
+    sbTrackerRef.current.reset();
     undoSkippedSegmentsRef.current.clear();
-    mutedSegmentsRecordedRef.current.clear();
-    notifiedSegmentsRef.current.clear();
     lastMediaIdentityRef.current = mediaIdentity;
+    // A new source gets its own failure report; a re-resolve keeps the mode.
+    retrySourceFiredRef.current = false;
 
     clearMediaBuffering();
     videoProgressSampleRef.current = null;
@@ -2017,6 +2188,19 @@ export const Player: React.FC<PlayerProps> = ({
   }, [clearMediaBuffering, mediaIdentity, resumeTime]);
 
   useEffect(() => {
+    if (!isSourceSwitching) return;
+    const startedAt = Date.now();
+    const timer = window.setTimeout(() => {
+      const video = videoRef.current;
+      if (!video || !sourceSwitchingRef.current) return;
+      if (!hasSourceSwitchTimedOut(startedAt, Date.now(), video.readyState)) return;
+      logPlayerEventRef.current("source-switch-timeout", { waitedMs: Date.now() - startedAt });
+      fireRetrySourceRef.current("source-switch-timeout");
+    }, SOURCE_SWITCH_TIMEOUT_MS);
+    return () => window.clearTimeout(timer);
+  }, [isSourceSwitching, mediaIdentity]);
+
+  useEffect(() => {
     const video = videoRef.current;
     const audio = audioRef.current;
     if (!video) return;
@@ -2037,7 +2221,7 @@ export const Player: React.FC<PlayerProps> = ({
       video.pause();
       audio?.pause();
     }
-  }, [error, isDashPlayback, isPlaying, isSourceSwitching, setIsPlaying, src, usesExternalAudio]);
+  }, [error, isDashPlayback, isHlsPlayback, isPlaying, isSourceSwitching, setIsPlaying, src, usesExternalAudio]);
 
   useEffect(() => {
     const video = videoRef.current;
@@ -2046,7 +2230,7 @@ export const Player: React.FC<PlayerProps> = ({
 
     audio.playbackRate = playbackRate;
     audio.preservesPitch = true;
-    audio.volume = muted ? 0 : volume;
+    audio.volume = muted ? 0 : outputVolume;
     audio.muted = muted || volume === 0;
 
     const audioIdentity = `${mediaIdentity}|${selectedAudioTrack?.localUrl ?? ""}`;
@@ -2070,6 +2254,7 @@ export const Player: React.FC<PlayerProps> = ({
     isSourceSwitching,
     mediaIdentity,
     muted,
+    outputVolume,
     playbackRate,
     selectedAudioTrack?.localUrl,
     usesExternalAudio,
@@ -2081,13 +2266,13 @@ export const Player: React.FC<PlayerProps> = ({
     const audio = audioRef.current;
     if (!video) return;
     const effectiveMuted = muted || sbMuted || isHandoffSilent;
-    video.volume = usesExternalAudio ? 0 : (effectiveMuted ? 0 : volume);
+    video.volume = usesExternalAudio ? 0 : (effectiveMuted ? 0 : outputVolume);
     video.muted = usesExternalAudio || effectiveMuted || volume === 0;
     if (audio) {
-      audio.volume = effectiveMuted ? 0 : volume;
+      audio.volume = effectiveMuted ? 0 : outputVolume;
       audio.muted = effectiveMuted || volume === 0;
     }
-  }, [isHandoffSilent, muted, sbMuted, usesExternalAudio, volume]);
+  }, [isHandoffSilent, muted, outputVolume, sbMuted, usesExternalAudio, volume]);
 
   useEffect(() => {
     const video = videoRef.current;
@@ -2124,128 +2309,108 @@ export const Player: React.FC<PlayerProps> = ({
   }, []);
 
   useEffect(() => {
-    if (sleepTimerRef.current) clearTimeout(sleepTimerRef.current);
-    if (sleepMinutes > 0) {
-      sleepTimerRef.current = setTimeout(() => setPlaybackDesired(false), sleepMinutes * 60_000);
-    }
-    return () => {
-      if (sleepTimerRef.current) clearTimeout(sleepTimerRef.current);
-    };
-  }, [setPlaybackDesired, sleepMinutes]);
-
-  useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
       if (target?.tagName === "INPUT" || target?.tagName === "TEXTAREA" || target?.isContentEditable) return;
       if (event.ctrlKey || event.metaKey || event.altKey) return;
 
-      switch (event.key.toLowerCase()) {
-        case " ":
-        case "k":
-          event.preventDefault();
+      const action = videoPlayerKeyAction(event.key, event.shiftKey);
+      if (action && action.kind !== "exit-fullscreen") event.preventDefault();
+      switch (action?.kind) {
+        case "toggle-play":
           togglePlay();
           break;
-        case "j":
+        case "next":
+          playNext(true);
+          break;
+        case "previous":
+          playPrevious();
+          break;
+        case "seek-back":
           seekBy(-seekIntervalSeconds);
           break;
-        case "l":
+        case "seek-forward":
           seekBy(seekIntervalSeconds);
           break;
-        case "arrowleft":
-          event.preventDefault();
-          seekBy(-seekIntervalSeconds);
-          break;
-        case "arrowright":
-          event.preventDefault();
-          seekBy(seekIntervalSeconds);
-          break;
-        case "arrowup": {
-          event.preventDefault();
-          const raised = Math.min(1, volume + 0.05);
-          setVolume(raised);
+        case "volume-up": {
+          const raised = Math.min(maxLevel, volumeLevelNow + 0.05);
+          setVolumeLevel(raised);
           setMuted(false);
           showVolumeFeedback(raised, false);
           break;
         }
-        case "arrowdown": {
-          event.preventDefault();
-          const lowered = Math.max(0, volume - 0.05);
-          setVolume(lowered);
+        case "volume-down": {
+          const lowered = Math.max(0, volumeLevelNow - 0.05);
+          setVolumeLevel(lowered);
           showVolumeFeedback(lowered, muted);
           break;
         }
-        case "m":
+        case "toggle-mute":
           setMuted((value) => !value);
           showVolumeFeedback(volume, !muted);
           break;
-        case "escape":
-          if (isFullscreen) {
+        case "exit-fullscreen":
+          if (isFullscreen && !event.defaultPrevented) {
             event.preventDefault();
             toggleFullscreen();
           }
           break;
-        case "f":
+        case "toggle-fullscreen":
           toggleFullscreen();
           break;
-        case "t":
+        case "toggle-theater":
           if (!isFullscreen) setIsTheaterMode(!isTheaterMode);
           break;
-        case "i":
+        case "toggle-pip":
           togglePictureInPicture();
           break;
-        case "c":
-          event.preventDefault();
+        case "toggle-captions":
           toggleCaptions();
           break;
-        case "+":
-        case "=":
-          event.preventDefault();
+        case "captions-larger":
           nudgeSubtitleFontSize(1);
           break;
-        case "-":
-          event.preventDefault();
+        case "captions-smaller":
           nudgeSubtitleFontSize(-1);
           break;
-        case ",":
-          event.preventDefault();
+        case "frame-back":
           stepFrame(-1);
           break;
-        case ".":
-          event.preventDefault();
+        case "frame-forward":
           stepFrame(1);
           break;
-        case "<":
-          event.preventDefault();
+        case "slower":
           stepPlaybackRate(-1);
           break;
-        case ">":
-          event.preventDefault();
+        case "faster":
           stepPlaybackRate(1);
           break;
-        case "[":
-          event.preventDefault();
+        case "previous-chapter":
           jumpChapter(-1);
           break;
-        case "]":
-          event.preventDefault();
+        case "next-chapter":
           jumpChapter(1);
           break;
-        case "home":
-          event.preventDefault();
-          seekTo(0);
-          break;
-        case "end":
-          event.preventDefault();
-          seekTo(duration);
-          break;
-        default: {
-          const digit = Number(event.key);
-          if (event.key.length === 1 && Number.isInteger(digit) && !isLive && duration > 0) {
-            event.preventDefault();
-            seekTo((duration * digit) / 10);
+        case "seek-start":
+          if (isLive && videoRef.current?.seekable.length) {
+            seekTo(liveWindow(videoRef.current).start);
+          } else {
+            seekTo(0);
           }
           break;
-        }
+        case "seek-end":
+          if (isLive && videoRef.current?.seekable.length) {
+            seekTo(liveEdgePosition(liveWindow(videoRef.current), readLiveTiming(videoRef.current)));
+          } else {
+            seekTo(duration);
+          }
+          break;
+        case "seek-to-fraction":
+          if (!isLive && duration > 0) seekTo(duration * action.fraction);
+          break;
+        case "look":
+          lookAround.current?.key(action.key);
+          break;
       }
       revealControls();
     };
@@ -2253,7 +2418,6 @@ export const Player: React.FC<PlayerProps> = ({
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [
-    currentTime,
     isFullscreen,
     isTheaterMode,
     muted,
@@ -2265,9 +2429,13 @@ export const Player: React.FC<PlayerProps> = ({
     isLive,
     jumpChapter,
     nudgeSubtitleFontSize,
+    playNext,
+    playPrevious,
     setIsTheaterMode,
     setMuted,
-    setVolume,
+    setVolumeLevel,
+    maxLevel,
+    volumeLevelNow,
     showVolumeFeedback,
     stepFrame,
     stepPlaybackRate,
@@ -2295,7 +2463,7 @@ export const Player: React.FC<PlayerProps> = ({
         }
       }
     }
-    if (pendingResumeTime > 0) {
+    if (pendingResumeTime > 0 || isLive) {
       setHasStartedPlayback(true);
       sourceSwitchingRef.current = false;
       setIsSourceSwitching(false);
@@ -2307,7 +2475,6 @@ export const Player: React.FC<PlayerProps> = ({
         }
       });
     }
-    updateBuffered();
   };
 
   const handleAudioLoadedMetadata = () => {
@@ -2354,25 +2521,30 @@ export const Player: React.FC<PlayerProps> = ({
     audio.load();
   };
 
-  const handleSkipNotifySegment = (segment: any) => {
-    if (!segment) return;
-    const video = videoRef.current;
-    if (!video) return;
-
-    const [_, end] = segment.segment;
-    seekTo(end);
-
-    setNotifyToast(prev => prev ? { ...prev, visible: false } : null);
-    if (notifyTimeoutRef.current !== null) {
-      window.clearTimeout(notifyTimeoutRef.current);
+  const showSponsorBlockNotice = (segment: SponsorBlockSegment) => {
+    setNotifyToast({ segment, categoryName: sponsorBlockCategoryLabel(segment.category), visible: true });
+    if (notifyTimeoutRef.current !== null) window.clearTimeout(notifyTimeoutRef.current);
+    notifyTimeoutRef.current = window.setTimeout(() => {
+      setNotifyToast((prev) => (prev ? { ...prev, visible: false } : null));
       notifyTimeoutRef.current = null;
-    }
+    }, 2000);
   };
+
+  const skipManualSegment = () => {
+    if (!manualSegment) return;
+    sbTrackerRef.current.dismiss(manualSegment.UUID);
+    seekTo(manualSegment.segment[1]);
+    setManualSegment(null);
+  };
+
 
   const handleTimeUpdate = () => {
     const video = videoRef.current;
     const audio = audioRef.current;
     if (!video) return;
+    if (!shouldPublishPlaybackTime(sourceSwitchingRef.current, video.readyState, lastMediaIdentityRef.current !== "")) {
+      return;
+    }
     const nextTime = video.currentTime;
     const nextDuration = video.duration || duration || 0;
 
@@ -2387,60 +2559,24 @@ export const Player: React.FC<PlayerProps> = ({
 
     let inMuteSegment = false;
     let muteSegmentCategoryName = "";
+    let manualSegment: SponsorBlockSegment | null = null;
 
     if (sponsorBlockEnabled) {
-      for (const segment of sponsorBlockSegments) {
-        const [start, end] = segment.segment;
-        const action: SponsorBlockAction = sponsorBlockActions[segment.category as SponsorBlockCategory] || "ignore";
-
-        if (action === "ignore") continue;
-
-        if (nextTime >= start && nextTime < end) {
-          if (action === "skip") {
-            if (!skippedSegmentsRef.current.has(segment.UUID)) {
-              skippedSegmentsRef.current.add(segment.UUID);
-
-              seekTo(end);
-
-              const durationSkipped = Math.max(0, end - start);
-              void incrementStats(segment.category as SponsorBlockCategory, durationSkipped);
-
-              return; 
-            }
-          } else if (action === "mute") {
-            inMuteSegment = true;
-            muteSegmentCategoryName = segment.category;
-
-            if (!mutedSegmentsRecordedRef.current.has(segment.UUID)) {
-              mutedSegmentsRecordedRef.current.add(segment.UUID);
-              const durationMuted = Math.max(0, end - start);
-              void incrementStats(segment.category as SponsorBlockCategory, durationMuted);
-            }
-          } else if (action === "notify") {
-            if (!notifiedSegmentsRef.current.has(segment.UUID)) {
-              notifiedSegmentsRef.current.add(segment.UUID);
-              
-              const catLabel = sponsorBlockCategoryLabel(segment.category);
-              setNotifyToast({
-                segment,
-                categoryName: catLabel,
-                visible: true
-              });
-
-              if (notifyTimeoutRef.current !== null) {
-                window.clearTimeout(notifyTimeoutRef.current);
-              }
-
-              notifyTimeoutRef.current = window.setTimeout(() => {
-                setNotifyToast(prev => prev ? { ...prev, visible: false } : null);
-                notifyTimeoutRef.current = null;
-              }, 2000);
-
-            }
-          }
-        }
+      const sb = sbTrackerRef.current.tick(nextTime, sponsorBlockSegments, sponsorBlockActions, !!video?.ended);
+      if (sb.skip) {
+        seekTo(sb.skip.segment[1]);
+        recordSponsorSkip(sb.skip);
+        return;
       }
+      if (sb.muteStarted) recordSponsorSkip(sb.muteStarted);
+      if (sb.mute) {
+        inMuteSegment = true;
+        muteSegmentCategoryName = sb.mute.category;
+      }
+      if (sb.notify) showSponsorBlockNotice(sb.notify);
+      manualSegment = sb.manual;
     }
+    setManualSegment((current) => (current?.UUID === manualSegment?.UUID ? current : manualSegment));
 
     if (inMuteSegment) {
       if (!sbMuted) {
@@ -2458,13 +2594,15 @@ export const Player: React.FC<PlayerProps> = ({
     setDuration(nextDuration);
     onTimeUpdate?.(nextTime, nextDuration);
     if (usesExternalAudio && audio) syncExternalAudio(false);
-    updateBuffered();
   };
 
+  // The root stays unclipped so the glow can leave it; what it used to clip lives in the content wrapper.
+  const fillsTallerSlot =
+    !isPipMode && !isFullscreen && adaptivePlayerAspect(videoAspect, adaptiveEnabled, isTheaterSurface) !== null;
   const playerRootClasses = cx(
-    isTheaterSurface
-      ? "relative w-full aspect-video max-h-[calc(100vh-160px)] min-h-[480px] bg-chrome-black flex items-center justify-center rounded-none overflow-hidden text-chrome-white outline-none shadow-none"
-      : "relative w-full aspect-video bg-chrome-black rounded-xl overflow-hidden text-chrome-white outline-none shadow-2xl",
+    "relative w-full outline-none",
+    fillsTallerSlot ? "h-full" : "aspect-video",
+    isTheaterSurface ? "max-h-[calc(100vh-160px)] min-h-[480px] rounded-none" : VIDEO_CORNERS,
     isFullscreen && "rounded-none",
     className
   );
@@ -2473,6 +2611,9 @@ export const Player: React.FC<PlayerProps> = ({
     <div
       ref={containerRef}
       id="flow-player-root"
+      // The frame and its controls run left to right in every language, as on Android: the
+      // timeline, the skip buttons and the double-tap sides all follow the video, not the text.
+      dir="ltr"
       data-fullscreen={isFullscreen || undefined}
       className={cx(
         "group/player",
@@ -2487,28 +2628,29 @@ export const Player: React.FC<PlayerProps> = ({
       onFocusCapture={handleFocusCapture}
       onBlurCapture={handleBlurCapture}
     >
-      {showAmbient && (
-        <div
-          aria-hidden="true"
-          className="pointer-events-none absolute inset-0 z-0 overflow-hidden bg-chrome-black"
-        >
-          <div
-            className="absolute inset-[-18%] opacity-95"
-            style={ambientBackdropStyle}
-          />
-          <div className="absolute inset-0 bg-chrome-black/25" />
-        </div>
-      )}
+      {showAmbient && <AmbientGlow videoRef={videoRef} intensity={ambient.intensity} spread={ambient.glow} />}
 
+      <div
+        data-player-content
+        // Inset, not h-full: WebKit resolves a percentage height against the root's uncapped aspect
+        // ratio, so in theater mode h-full ran past max-h and over the page below.
+        className={cx(
+          "absolute inset-0 z-10 overflow-hidden text-chrome-white",
+          !showAmbient && "bg-chrome-black",
+          isTheaterSurface ? "flex items-center justify-center rounded-none" : VIDEO_CORNERS,
+          isFullscreen && "rounded-none",
+        )}
+      >
       <video
         ref={videoRef}
+        // Set before src: the equalizer can only read cross-origin audio fetched with CORS.
+        crossOrigin="anonymous"
         src={isDashPlayback || isHlsPlayback ? undefined : src || undefined}
         poster={effectivePoster}
         loop={videoLoopEnabled && !isLive}
         playsInline
         preload="auto"
         onLoadedMetadata={handleLoadedMetadata}
-        onProgress={updateBuffered}
         onTimeUpdate={handleTimeUpdate}
         onPlaying={() => {
           const activeVideoId = usePlayerStore.getState().currentVideo?.id;
@@ -2548,6 +2690,10 @@ export const Player: React.FC<PlayerProps> = ({
           setIsPlaying(false);
         }}
         onEnded={() => {
+          if (sleepTimerTakesEnd()) {
+            setPlaybackDesired(false);
+            return;
+          }
           if (videoLoopEnabled && !isLive) {
             seekTo(0);
             setPlaybackDesired(true);
@@ -2563,12 +2709,22 @@ export const Player: React.FC<PlayerProps> = ({
             setPlaybackDesired(false);
           }
         }}
-        className="relative z-10 h-full w-full object-contain"
+        className={cx("relative z-10 h-full w-full", VIDEO_FIT_CLASS[isPipMode ? "fit" : videoFit], showsSpherical && "opacity-0")}
       />
+      {showsSpherical && (
+        <SphericalView
+          videoRef={videoRef}
+          projection={projection ?? "equirectangular"}
+          speed={lookSpeed}
+          lookAround={lookAround}
+          onUnavailable={onSphericalUnavailable}
+        />
+      )}
 
       {usesExternalAudio && selectedAudioTrack?.localUrl && (
         <audio
           ref={audioRef}
+          crossOrigin="anonymous"
           src={selectedAudioTrack.localUrl}
           preload="auto"
           onLoadedMetadata={handleAudioLoadedMetadata}
@@ -2583,8 +2739,6 @@ export const Player: React.FC<PlayerProps> = ({
         src={src}
         isPlaying={isPlaying}
         playbackRate={playbackRate}
-        currentTime={currentTime}
-        duration={duration}
         seekFeedback={seekFeedback}
         volumeFeedback={volumeFeedback}
         qualityLabel={selectedQualityId === "auto" ? activeQualityLabel : selectedQuality?.qualityLabel}
@@ -2592,6 +2746,7 @@ export const Player: React.FC<PlayerProps> = ({
         bitrate={selectedQuality?.bitrate}
         captionCount={captions.length}
         seekIntervalSeconds={seekIntervalSeconds}
+        doubleClickSeek={doubleClickSeek}
         longPressPlaybackRate={longPressPlaybackRate}
         loopEnabled={videoLoopEnabled}
         setPlaybackRate={setPlaybackRate}
@@ -2599,14 +2754,18 @@ export const Player: React.FC<PlayerProps> = ({
         togglePlay={togglePlay}
         toggleFullscreen={toggleFullscreen}
         togglePictureInPicture={togglePictureInPicture}
-        seekTo={seekTo}
-        onSeekFeedback={showSeekFeedback}
+        seekBy={seekBy}
         onRevealControls={revealControls}
         isCompact={isPipMode}
+        canDragWindow={isPopOut}
+        canDragFrame={isPipMode && !isPopOut && !isFullscreen}
+        settingsOpen={settingsOpen}
+        onCloseSettings={closeSettings}
+        lookAround={showsSpherical ? lookAround : null}
       />
 
       {pendingQualitySwitch && (
-        <div className="pointer-events-none absolute left-1/2 top-8 z-30 -translate-x-1/2 rounded-full bg-chrome-black/60 px-4 py-1.5 text-xs font-bold text-chrome-white animate-fade-in">
+        <div className="pointer-events-none absolute left-1/2 top-8 z-30 -translate-x-1/2 rounded-full border border-chrome-neutral-800 bg-chrome-neutral-950/85 px-3.5 py-1 text-xs font-medium tracking-wide text-chrome-neutral-200 animate-fade-in">
           {pendingQualitySwitch.etaSeconds && pendingQualitySwitch.etaSeconds > 1
             ? getString("player_quality_switch_in", pendingQualitySwitch.label, pendingQualitySwitch.etaSeconds)
             : getString("player_quality_switching", pendingQualitySwitch.label)}
@@ -2637,19 +2796,21 @@ export const Player: React.FC<PlayerProps> = ({
       )}
 
       {/* Modular Subtitle Overlay */}
-      <SubtitleOverlay
+      <PlayerSubtitles
         captions={captions}
         selectedCaptionId={selectedCaptionId}
-        currentTime={currentTime}
         shouldShowControls={shouldShowControls}
+        offsetMs={subtitleOffsetMs}
       />
 
       {(isLoading || error || errorInfo) && (
         <div className="absolute inset-0 z-30 grid place-items-center bg-chrome-black/60 px-6 text-center">
           {isLoading ? (
-            <div className="flex flex-col items-center gap-3 text-sm font-semibold text-chrome-zinc-200">
-              <Loader2 className="animate-spin text-primary" size={34} />
-              {getString("player_resolving_stream")}
+            <div className="flex flex-col items-center gap-2.5">
+              <Loader2 className="animate-spin text-primary" size={28} />
+              <span className="text-xs font-medium tracking-wide text-chrome-neutral-300">
+                {getString("player_resolving_stream")}
+              </span>
             </div>
           ) : errorInfo ? (
             <PlayerErrorState
@@ -2657,6 +2818,9 @@ export const Player: React.FC<PlayerProps> = ({
               onRetry={onRetry}
               onCopyLogs={onCopyLogs}
               onOpenInBrowser={onOpenInBrowser}
+              upcomingAction={
+                errorInfo.startsAtMs != null ? <CurrentVideoReminderButton startsAtMs={errorInfo.startsAtMs} /> : undefined
+              }
             />
           ) : (
             <div className="max-w-md space-y-4">
@@ -2678,52 +2842,30 @@ export const Player: React.FC<PlayerProps> = ({
       )}
 
       {videoCodecUnsupported && !isLoading && !error && !errorInfo && (
-        <div className="absolute inset-x-4 top-4 z-40 mx-auto max-w-md rounded-2xl border border-chrome-toast-border bg-chrome-toast/95 px-4 py-3">
-          <div className="flex items-start gap-3">
-            <AlertTriangle className="mt-0.5 shrink-0 text-primary" size={18} />
-            <div className="min-w-0 space-y-2">
-              <div className="text-sm font-bold text-chrome-neutral-100">
-                {getString("player_codec_missing_title")}
-              </div>
-              <p className="text-xs text-chrome-neutral-300">
-                {getString("player_codec_missing_hint")}
-              </p>
-              <p className="text-xs text-chrome-neutral-400">
-                {getString("player_codec_missing_command_hint")}
-              </p>
-              <code className="block overflow-x-auto rounded-md bg-chrome-black/60 px-2 py-1.5 font-mono text-[11px] text-chrome-neutral-200">
-                sudo apt install gstreamer1.0-libav gstreamer1.0-plugins-bad gstreamer1.0-plugins-good gstreamer1.0-plugins-ugly
-              </code>
-              <button
-                type="button"
-                onClick={() => {
-                  codecWarningDismissedRef.current = true;
-                  setVideoCodecUnsupported(false);
-                }}
-                className="text-xs font-semibold text-chrome-neutral-400 transition-colors hover:text-chrome-neutral-100"
-              >
-                {getString("player_codec_missing_dismiss")}
-              </button>
-            </div>
-          </div>
-        </div>
+        <CodecMissingBanner
+          onDismiss={() => {
+            codecWarningDismissedRef.current = true;
+            setVideoCodecUnsupported(false);
+          }}
+        />
+      )}
+
+      {overlay}
+      {!isPipMode && badge}
+
+      {manualSegment && !overlay && (
+        <SponsorBlockSkipButton segment={manualSegment} compact={isPipMode} onClick={skipManualSegment} />
       )}
 
       {/* SponsorBlock Notify Toast */}
       {notifyToast && notifyToast.visible && (
-        <div className="absolute bottom-20 right-6 z-40 bg-chrome-toast/95 border border-chrome-toast-border rounded-xl px-4 py-3 shadow-2xl flex items-center gap-3 transition-transform duration-300 animate-slide-up select-none animate-fade-in">
+        <div className="absolute bottom-32 right-3 z-40 sm:right-5 bg-chrome-toast/95 border border-chrome-toast-border rounded-xl px-4 py-3 shadow-2xl flex items-center gap-3 transition-transform duration-300 animate-slide-up select-none animate-fade-in">
           <div className="flex flex-col">
             <span className="text-[10px] font-bold text-chrome-neutral-400 uppercase tracking-wider">SponsorBlock</span>
             <span className="text-xs font-semibold text-chrome-neutral-200">
-              {notifyToast.categoryName} Segment
+              {getString("player_sponsorblock_segment_notice", notifyToast.categoryName)}
             </span>
           </div>
-          <button
-            onClick={() => handleSkipNotifySegment(notifyToast.segment)}
-            className="ml-2 px-3.5 py-1.5 rounded-full bg-primary hover:bg-chrome-red-700 active:scale-95 text-chrome-white font-bold text-xs uppercase tracking-wider transition-all cursor-pointer shadow-md"
-          >
-            Skip
-          </button>
         </div>
       )}
 
@@ -2735,7 +2877,7 @@ export const Player: React.FC<PlayerProps> = ({
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" d="M17 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2" />
           </svg>
           <span className="text-xs font-bold text-chrome-neutral-200">
-            SponsorBlock Muted ({sponsorBlockCategoryLabel(currentSBMuteSegment || "filler")})
+            {getString("player_sponsorblock_muted", sponsorBlockCategoryLabel(currentSBMuteSegment || "filler"))}
           </span>
         </div>
       )}
@@ -2764,7 +2906,7 @@ export const Player: React.FC<PlayerProps> = ({
         setControlsVisible={setControlsVisible}
         shouldShowControls={shouldShowControls}
         qualities={supportedQualities}
-        selectedQualityId={selectedQualityId || "auto"}
+        selectedQualityId={selectedQualityId && selectedQualityId !== "auto" ? selectedQuality?.id ?? selectedQualityId : "auto"}
         isDashPlayback={isDashPlayback}
         isLive={isLive}
         onSelectQuality={onSelectQuality}
@@ -2774,9 +2916,6 @@ export const Player: React.FC<PlayerProps> = ({
         audioTracks={audioTracks}
         selectedAudioTrackId={selectedAudioTrackId}
         setSelectedAudioTrackId={setSelectedAudioTrackId}
-        bufferedPct={bufferedPct}
-        sleepMinutes={sleepMinutes}
-        setSleepMinutes={setSleepMinutes}
         muted={muted}
         setMuted={setMuted}
         isFullscreen={isFullscreen}
@@ -2785,19 +2924,25 @@ export const Player: React.FC<PlayerProps> = ({
         togglePictureInPicture={togglePictureInPicture}
         showPipButton={manualPipButtonEnabled}
         showFullscreenTitle={showFullscreenTitle}
+        isPopOut={isPopOut}
         seekTo={seekTo}
         togglePlay={togglePlay}
+        stepFrame={isLive ? undefined : stepFrame}
         speedOptions={configuredSpeedOptions}
         speedSliderEnabled={speedSliderEnabled}
         onSelectPlaybackRate={selectPlaybackRate}
+        spherical={sphericalMenu}
         settingsOpen={settingsOpen}
         setSettingsOpen={setSettingsOpen}
         isScrubbing={isScrubbing}
         setIsScrubbing={setIsScrubbing}
         chapters={chapters}
+        heatmap={heatmap}
+        storyboard={storyboard}
         activeQualityLabel={isDashPlayback ? (activeQualityLabel || undefined) : (qualities.find(q => q.localUrl === src)?.qualityLabel || undefined)}
       />
       )}
+      </div>
     </div>
   );
 };

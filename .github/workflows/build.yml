@@ -7,7 +7,8 @@ on:
   pull_request:
   workflow_dispatch:
   schedule:
-    - cron: "17 3 * * *"
+    # Weekly, inside the 7-day cache eviction and 14-day artifact retention.
+    - cron: "17 3 * * 1"
 
 concurrency:
   group: build-${{ github.workflow }}-${{ github.ref }}
@@ -27,44 +28,49 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install Linux system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            build-essential \
-            curl \
-            file \
-            libayatana-appindicator3-dev \
-            libgtk-3-dev \
-            librsvg2-dev \
-            libssl-dev \
-            libwebkit2gtk-4.1-dev \
-            libxdo-dev \
-            patchelf \
-            pkg-config \
-            wget \
+        uses: ./.github/actions/apt-install
+        with:
+          cache-key: build-deps-ubuntu-22.04-x64
+          packages: |
+            build-essential
+            curl
+            file
+            libayatana-appindicator3-dev
+            libgtk-3-dev
+            librsvg2-dev
+            libssl-dev
+            libwebkit2gtk-4.1-dev
+            libxdo-dev
+            patchelf
+            pkg-config
+            wget
             xdg-utils
 
       - name: Install pnpm
-        uses: pnpm/action-setup@v6
+        uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
 
       - name: Set up Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
           cache: pnpm
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
+          toolchain: stable
           components: clippy,rustfmt
 
       - name: Cache Rust build data
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: src-tauri -> target
+          # PRs restore main's caches; saving from every branch overflows the
+          # repo's 10 GB and evicts main's.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
@@ -90,71 +96,80 @@ jobs:
   platform-build:
     name: Compile (${{ matrix.name }})
     if: github.event_name == 'pull_request'
-    needs: quality
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         include:
+          # Same runner and target as a nightly leg, so each restores that
+          # leg's cache from main.
           - name: Windows x64
             runner: windows-2025
+            target: x86_64-pc-windows-msvc
           - name: Linux x64
             runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
           - name: macOS ARM64
             runner: macos-15
+            target: aarch64-apple-darwin
 
     runs-on: ${{ matrix.runner }}
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install Linux system dependencies
         if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            build-essential \
-            curl \
-            file \
-            libayatana-appindicator3-dev \
-            libgtk-3-dev \
-            librsvg2-dev \
-            libssl-dev \
-            libwebkit2gtk-4.1-dev \
-            libxdo-dev \
-            patchelf \
-            pkg-config \
-            wget \
+        uses: ./.github/actions/apt-install
+        with:
+          # Same packages and image as the quality job, so it restores that cache.
+          cache-key: build-deps-ubuntu-22.04-x64
+          packages: |
+            build-essential
+            curl
+            file
+            libayatana-appindicator3-dev
+            libgtk-3-dev
+            librsvg2-dev
+            libssl-dev
+            libwebkit2gtk-4.1-dev
+            libxdo-dev
+            patchelf
+            pkg-config
+            wget
             xdg-utils
 
       - name: Install pnpm
-        uses: pnpm/action-setup@v6
+        uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
 
       - name: Set up Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
           cache: pnpm
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: stable
 
       - name: Cache Rust build data
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: src-tauri -> target
+          shared-key: nightly-${{ matrix.target }}-${{ matrix.runner }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
 
       - name: Compile desktop application
-        run: pnpm tauri build --no-bundle
+        run: pnpm tauri build --target ${{ matrix.target }} --no-bundle -- --profile nightly
 
   nightly-package:
     name: Nightly (${{ matrix.name }})
     if: github.event_name != 'pull_request'
-    needs: quality
     timeout-minutes: 120
     strategy:
       fail-fast: false
@@ -198,70 +213,75 @@ jobs:
             args: --target aarch64-unknown-linux-gnu --bundles appimage
           - name: macOS Intel
             slug: macos-x64
-            runner: macos-15-intel
+            # Cross-compiles x86_64 on Apple Silicon, as Tauri's own CI guide does.
+            runner: macos-15
             target: x86_64-apple-darwin
-            args: --target x86_64-apple-darwin --bundles dmg
+            # The app bundle is what the updater installs.
+            args: --target x86_64-apple-darwin --bundles app,dmg
           - name: macOS Apple Silicon
             slug: macos-arm64
             runner: macos-15
             target: aarch64-apple-darwin
-            args: --target aarch64-apple-darwin --bundles dmg
+            args: --target aarch64-apple-darwin --bundles app,dmg
 
     runs-on: ${{ matrix.runner }}
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install Linux system dependencies
         if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            build-essential \
-            curl \
-            file \
-            gstreamer1.0-alsa \
-            gstreamer1.0-gl \
-            gstreamer1.0-libav \
-            gstreamer1.0-plugins-bad \
-            gstreamer1.0-plugins-base \
-            gstreamer1.0-plugins-good \
-            gstreamer1.0-pulseaudio \
-            libayatana-appindicator3-dev \
-            libfuse2 \
-            libgtk-3-dev \
-            librsvg2-dev \
-            libssl-dev \
-            libwebkit2gtk-4.1-dev \
-            libxdo-dev \
-            patchelf \
-            pkg-config \
-            rpm \
-            wget \
+        uses: ./.github/actions/apt-install
+        with:
+          cache-key: nightly-${{ matrix.runner }}
+          packages: |
+            build-essential
+            curl
+            file
+            gstreamer1.0-alsa
+            gstreamer1.0-gl
+            gstreamer1.0-libav
+            gstreamer1.0-plugins-bad
+            gstreamer1.0-plugins-base
+            gstreamer1.0-plugins-good
+            gstreamer1.0-pulseaudio
+            libayatana-appindicator3-dev
+            libfuse2
+            libgtk-3-dev
+            librsvg2-dev
+            libssl-dev
+            libwebkit2gtk-4.1-dev
+            libxdo-dev
+            patchelf
+            pkg-config
+            rpm
+            wget
             xdg-utils
 
       - name: Install pnpm
-        uses: pnpm/action-setup@v6
+        uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
 
       - name: Set up Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
           cache: pnpm
 
       - name: Install Rust target
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
+          toolchain: stable
           targets: ${{ matrix.target }}
 
       - name: Cache Rust build data
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: src-tauri -> target
           # Per runner image: build scripts compiled against 24.04's glibc
           # can't run on 22.04.
           shared-key: nightly-${{ matrix.target }}-${{ matrix.runner }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
@@ -270,75 +290,378 @@ jobs:
         run: node scripts/write-nightly-config.mjs
 
       - name: Build nightly packages
-        run: pnpm tauri build ${{ matrix.args }} --config src-tauri/tauri.nightly.generated.json
+        env:
+          # Read at compile time; without them Last.fm sign-in stays off in the build.
+          LASTFM_API_KEY: ${{ secrets.LASTFM_API_KEY }}
+          LASTFM_API_SECRET: ${{ secrets.LASTFM_API_SECRET }}
+        # [profile.nightly] trades fat LTO for thin LTO; tagged releases keep
+        # [profile.release].
+        run: pnpm tauri build ${{ matrix.args }} --config src-tauri/tauri.nightly.generated.json -- --profile nightly
+
+      - name: Check the Linux packages
+        if: runner.os == 'Linux' && !matrix.appimage
+        run: bash scripts/check-linux-packages.sh src-tauri/target/${{ matrix.target }}/nightly/bundle flow-desktop-nightly
 
       - name: Log the bundled media stack versions
         if: matrix.appimage
         run: dpkg-query -W -f='${Package} ${Version}\n' libwebkit2gtk-4.1-0 libgstreamer1.0-0 libva2
 
-      # Nightly AppImages ship as plain artifacts (no updater signature), so no
-      # re-sign is needed here.
       - name: Post-process the AppImage
         if: matrix.appimage
         shell: bash
         run: |
-          appimage="$(ls src-tauri/target/${{ matrix.target }}/release/bundle/appimage/*.AppImage | head -n1)"
+          appimage="$(ls src-tauri/target/${{ matrix.target }}/nightly/bundle/appimage/*.AppImage | head -n1)"
           bash scripts/postprocess-appimage.sh "$appimage" "${{ matrix.appimage }}"
 
       - name: Report package sizes
-        run: node scripts/report-bundle-sizes.mjs src-tauri/target/${{ matrix.target }}/release/bundle
+        run: node scripts/report-bundle-sizes.mjs src-tauri/target/${{ matrix.target }}/nightly/bundle
 
-      - name: Upload Windows nightly installer
-        if: runner.os == 'Windows'
-        uses: actions/upload-artifact@v7
+      # The version is in every name, so the publish job can tell this build's
+      # files from an older build's still on the nightly release.
+      - name: Stage nightly release assets
+        shell: bash
+        env:
+          BUNDLE: src-tauri/target/${{ matrix.target }}/nightly/bundle
+          SLUG: ${{ matrix.slug }}
+          APPIMAGE: ${{ matrix.appimage }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          # Linux carries "+" build metadata, which reads badly in a download URL.
+          version="$(node -p "require('./src-tauri/tauri.nightly.generated.json').version.replace('+', '-')")"
+          prefix="nightly-assets/Flow-Nightly_${version}_${SLUG}"
+          mkdir -p nightly-assets
+
+          stage() {
+            local destination="$1"
+            shift
+            if [[ $# -ne 1 ]]; then
+              echo "expected one file for ${destination}, found $#: $*" >&2
+              exit 1
+            fi
+            cp "$1" "$destination"
+            echo "staged $destination"
+          }
+
+          case "$RUNNER_OS" in
+            Windows) stage "$prefix-setup.exe" "$BUNDLE"/nsis/*-setup.exe ;;
+            macOS)
+              stage "$prefix.dmg" "$BUNDLE"/dmg/*.dmg
+              apps=("$BUNDLE"/macos/*.app)
+              if [[ ${#apps[@]} -ne 1 ]]; then
+                echo "expected one app bundle, found ${#apps[@]}" >&2
+                exit 1
+              fi
+              # Laid out like Tauri's own updater archive, the .app folder at
+              # the top, without AppleDouble files.
+              COPYFILE_DISABLE=1 tar --no-mac-metadata -czf "$prefix.app.tar.gz" \
+                -C "$BUNDLE/macos" "$(basename "${apps[0]}")"
+              ;;
+            Linux)
+              if [[ -n "$APPIMAGE" ]]; then
+                stage "$prefix.AppImage" "$BUNDLE"/appimage/*.AppImage
+              else
+                stage "$prefix.deb" "$BUNDLE"/deb/*.deb
+                stage "$prefix.rpm" "$BUNDLE"/rpm/*.rpm
+              fi
+              ;;
+          esac
+
+      - name: Start the built packages
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          for pkg in nightly-assets/*.deb nightly-assets/*.AppImage; do
+            bash scripts/smoke-test-linux.sh "$pkg"
+          done
+
+      - name: Upload nightly release assets
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: Flow-nightly-${{ matrix.slug }}-${{ github.run_number }}
-          path: src-tauri/target/${{ matrix.target }}/release/bundle/nsis/*.exe
+          name: nightly-${{ matrix.slug }}${{ matrix.appimage && '-appimage' || '' }}-${{ github.run_number }}
+          path: nightly-assets/
           if-no-files-found: error
           retention-days: 14
 
-      - name: Upload macOS nightly disk image
-        if: runner.os == 'macOS'
-        uses: actions/upload-artifact@v7
+  # Signs the nightly packages with the nightly key, which only the
+  # nightly-signing environment holds. The job builds nothing and installs only
+  # the Tauri CLI locked in .github/signing.
+  nightly-sign:
+    name: Sign the nightly packages
+    needs: nightly-package
+    if: github.ref == 'refs/heads/main' && github.repository == 'Flow-Tube/Flow-Desktop'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: nightly-signing
+    permissions:
+      contents: read
+
+    steps:
+      - name: Check out the signing files
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          name: Flow-nightly-${{ matrix.slug }}-${{ github.run_number }}
-          path: src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg
+          persist-credentials: false
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            .github/signing/
+            scripts/nightly-updater-manifest.mjs
+            scripts/nightly-version.mjs
+            scripts/sign-updater-files.sh
+            scripts/updater-manifest.mjs
+            scripts/verify-updater-manifests.mjs
+            src-tauri/tauri.conf.json
+            src-tauri/updater-nightly.pub
+
+      - name: Install the Tauri CLI
+        working-directory: .github/signing
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Download nightly release assets
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: nightly-*-${{ github.run_number }}
+          path: upload
+          merge-multiple: true
+
+      - name: Plan the signatures
+        run: node scripts/nightly-updater-manifest.mjs plan upload > signing-plan.tsv
+
+      - name: Sign the updater packages
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.NIGHTLY_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.NIGHTLY_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: bash scripts/sign-updater-files.sh upload signing-plan.tsv
+
+      - name: Check the signatures against the nightly key
+        run: |
+          node scripts/nightly-updater-manifest.mjs write upload
+          node scripts/verify-updater-manifests.mjs upload src-tauri/updater-nightly.pub
+
+      - name: Upload the signatures
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: nightly-signatures-${{ github.run_number }}
+          path: upload/*.sig
           if-no-files-found: error
           retention-days: 14
 
-      - name: Upload Linux nightly AppImage
-        if: matrix.appimage
-        uses: actions/upload-artifact@v7
-        with:
-          name: Flow-nightly-${{ matrix.slug }}-appimage-${{ github.run_number }}
-          path: src-tauri/target/${{ matrix.target }}/release/bundle/appimage/*.AppImage
-          if-no-files-found: error
-          retention-days: 14
+  # A run started by hand on another branch signs with a key made in the job,
+  # so the signing, the manifests and their check run without the nightly key
+  # and without publishing anything.
+  nightly-sign-dry-run:
+    name: Sign the nightly packages (dry run)
+    needs: nightly-package
+    if: github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
 
-      - name: Upload Linux nightly Debian package
-        if: runner.os == 'Linux' && !matrix.appimage
-        uses: actions/upload-artifact@v7
+    steps:
+      - name: Check out the signing files
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          name: Flow-nightly-${{ matrix.slug }}-deb-${{ github.run_number }}
-          path: src-tauri/target/${{ matrix.target }}/release/bundle/deb/*.deb
-          if-no-files-found: error
-          retention-days: 14
+          persist-credentials: false
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            .github/signing/
+            scripts/nightly-updater-manifest.mjs
+            scripts/nightly-version.mjs
+            scripts/sign-updater-files.sh
+            scripts/updater-manifest.mjs
+            scripts/verify-updater-manifests.mjs
+            src-tauri/tauri.conf.json
 
-      - name: Upload Linux nightly RPM package
-        if: runner.os == 'Linux' && !matrix.appimage
-        uses: actions/upload-artifact@v7
+      - name: Install the Tauri CLI
+        working-directory: .github/signing
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Download nightly release assets
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: Flow-nightly-${{ matrix.slug }}-rpm-${{ github.run_number }}
-          path: src-tauri/target/${{ matrix.target }}/release/bundle/rpm/*.rpm
+          pattern: nightly-*-${{ github.run_number }}
+          path: upload
+          merge-multiple: true
+
+      - name: Plan the signatures
+        run: node scripts/nightly-updater-manifest.mjs plan upload > signing-plan.tsv
+
+      - name: Sign with a throwaway key
+        run: |
+          set -euo pipefail
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD="$(openssl rand -hex 16)"
+          TAURI_SIGNING_PRIVATE_KEY_PATH="$RUNNER_TEMP/throwaway.key"
+          export TAURI_SIGNING_PRIVATE_KEY_PASSWORD TAURI_SIGNING_PRIVATE_KEY_PATH
+          .github/signing/node_modules/.bin/tauri signer generate --ci \
+            -w "$TAURI_SIGNING_PRIVATE_KEY_PATH" -p "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" >/dev/null
+          bash scripts/sign-updater-files.sh upload signing-plan.tsv
+
+      - name: Check the signatures against the throwaway key
+        run: |
+          NIGHTLY_NOTES="Dry run" node scripts/nightly-updater-manifest.mjs write upload
+          node scripts/verify-updater-manifests.mjs upload "$RUNNER_TEMP/throwaway.key.pub"
+
+      - name: Upload the manifests and signatures
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: signing-dry-run-${{ github.run_number }}
+          path: |
+            upload/latest*.json
+            upload/*.sig
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 3
+
+  # Publishes the packages to one rolling "nightly" prerelease, edited in place
+  # so watchers aren't notified for every build. It is never marked Latest:
+  # stable installs read their updates from releases/latest. No signing key
+  # reaches this job.
+  nightly-publish:
+    name: Publish the nightly release
+    needs: [nightly-package, nightly-sign]
+    # A fork with Actions on would otherwise publish its own nightly release.
+    if: github.ref == 'refs/heads/main' && github.repository == 'Flow-Tube/Flow-Desktop'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    concurrency:
+      group: nightly-release
+      cancel-in-progress: false
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Download nightly release assets and signatures
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: nightly-*-${{ github.run_number }}
+          path: upload
+          merge-multiple: true
+
+      - name: Check the packages and write checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          cd upload
+          for kind in windows-x64-setup.exe windows-arm64-setup.exe \
+            macos-x64.dmg macos-arm64.dmg macos-x64.app.tar.gz macos-arm64.app.tar.gz \
+            linux-x64.deb linux-x64.rpm linux-x64.AppImage linux-arm64.deb linux-arm64.rpm linux-arm64.AppImage; do
+            matches=(Flow-Nightly_*_"$kind")
+            if [[ ${#matches[@]} -ne 1 ]]; then
+              echo "expected one $kind package, found ${#matches[@]}" >&2
+              exit 1
+            fi
+          done
+          for file in Flow-Nightly_*; do
+            [[ "$file" == *.sig ]] || sha256sum -- "$file"
+          done > SHA256SUMS
+          cat SHA256SUMS
+
+      # The update dialog and the release list the changes the next release's
+      # changelog holds so far, as the Android nightly does.
+      - name: Write the release notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('./src-tauri/tauri.conf.json').version")"
+          node scripts/release-notes.mjs --next "$version" > changes.md
+          node scripts/release-notes.mjs --next "$version" --app > changes.txt
+
+      - name: Write the updater manifests
+        shell: bash
+        run: |
+          set -euo pipefail
+          notes="Nightly build of main at ${GITHUB_SHA::7}, $(date -u +%Y-%m-%d). Nightly builds can break and are not for daily use."
+          if [[ -s changes.txt ]]; then
+            notes+=$'\n\n'"$(cat changes.txt)"
+          fi
+          NIGHTLY_NOTES="$notes" node scripts/nightly-updater-manifest.mjs write upload
+
+      - name: Check the signatures against the nightly key
+        run: node scripts/verify-updater-manifests.mjs upload src-tauri/updater-nightly.pub
+
+      - name: Publish to the nightly release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          RUN_NUMBER: ${{ github.run_number }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          tag=nightly
+          short_sha="${GITHUB_SHA::7}"
+          built="$(date -u '+%Y-%m-%d %H:%M UTC')"
+
+          # A re-run of an older workflow must not roll the release back.
+          if body="$(gh release view "$tag" --json body --jq .body 2>/dev/null)"; then
+            exists=true
+            published_run="$(grep -oE 'nightly-run: [0-9]+' <<<"$body" | grep -oE '[0-9]+' || true)"
+            if [[ -n "$published_run" && "$published_run" -gt "$RUN_NUMBER" ]]; then
+              echo "::notice::The nightly release already holds run $published_run; run $RUN_NUMBER is not published."
+              exit 0
+            fi
+          else
+            exists=false
+          fi
+
+          cat > notes.md <<EOF
+          Automatic build of \`main\` at ${GITHUB_SHA} on ${built}, from [workflow run ${RUN_NUMBER}](${RUN_URL}).
+
+          **Not for daily use.** Nightly builds can break. They install as **Flow Nightly**, keep their own data apart from Flow, and are replaced by every new build. For the stable app, use the [latest release](https://github.com/${GH_REPO}/releases/latest).
+
+          Pick the file for your system: \`-setup.exe\` for Windows, \`.dmg\` for macOS, \`.deb\`, \`.rpm\` or \`.AppImage\` for Linux. \`SHA256SUMS\` lists the checksum of every file.
+
+          <!-- nightly-run: ${RUN_NUMBER} -->
+          EOF
+          title="Flow Nightly ${built%% *} (${short_sha})"
+
+          # Move the tag to the built commit before the release points at it.
+          if gh api "repos/${GH_REPO}/git/ref/tags/${tag}" >/dev/null 2>&1; then
+            gh api -X PATCH "repos/${GH_REPO}/git/refs/tags/${tag}" -f sha="$GITHUB_SHA" -F force=true >/dev/null
+          else
+            gh api "repos/${GH_REPO}/git/refs" -f ref="refs/tags/${tag}" -f sha="$GITHUB_SHA" >/dev/null
+          fi
+
+          printf '\n%s\n' "Installed nightly builds look for the next one and update themselves." >> notes.md
+          if [[ -s changes.md ]]; then
+            printf '\n%s\n\n' "**What's new since the last release.** These changes ship in the next one." >> notes.md
+            cat changes.md >> notes.md
+          fi
+
+          if [[ "$exists" == true ]]; then
+            gh release edit "$tag" --title "$title" --notes-file notes.md --prerelease --latest=false
+          else
+            gh release create "$tag" --verify-tag --title "$title" --notes-file notes.md --prerelease --latest=false
+          fi
+
+          # Packages first, manifests last, so the manifest never points at a
+          # file that isn't there yet.
+          shopt -s extglob
+          gh release upload "$tag" upload/!(latest*.json) --clobber
+          gh release upload "$tag" upload/latest*.json --clobber
+
+          # Older builds' files have other names; drop them so the release
+          # holds one build.
+          keep="$(ls upload)"
+          gh release view "$tag" --json assets --jq '.assets[].name' | while read -r name; do
+            if ! grep -Fxq -- "$name" <<<"$keep"; then
+              echo "removing stale asset $name"
+              gh release delete-asset "$tag" "$name" --yes
+            fi
+          done
 
   # The Flatpak builds offline inside flatpak-builder, so its Cargo and pnpm
   # sources are generated on the host first and handed to the build job.
   flatpak-sources:
     name: Nightly (Linux x64 Flatpak sources)
     if: github.event_name != 'pull_request'
-    needs: quality
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     # Prototype: drop continue-on-error here and in nightly-flatpak before the
@@ -347,10 +670,10 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Python
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
 
@@ -358,7 +681,7 @@ jobs:
         run: bash scripts/flatpak-sources.sh
 
       - name: Upload Flatpak sources
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: flatpak-sources-${{ github.run_number }}
           path: packaging/flatpak/generated-sources/
@@ -378,16 +701,26 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Download Flatpak sources
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: flatpak-sources-${{ github.run_number }}
           path: packaging/flatpak/generated-sources
 
+      # The image ships its runtimes in a read-only layer, and Docker's overlay filesystem
+      # can't rename directories out of it (EXDEV, "Invalid cross-device link"). Without a
+      # restored cache, flatpak-builder then fails to update the GNOME SDK and crashes.
+      # A copy in the container's own layer can be updated in place.
+      - name: Move the image's Flatpak installation into the container layer
+        run: |
+          cp -a /var/lib/flatpak /var/lib/flatpak.writable
+          rm -rf /var/lib/flatpak
+          mv /var/lib/flatpak.writable /var/lib/flatpak
+
       - name: Build the Flatpak bundle
-        uses: flatpak/flatpak-github-actions/flatpak-builder@v6
+        uses: flatpak/flatpak-github-actions/flatpak-builder@79327416609af08178ad73b352877e51450790b3 # v6.8
         with:
           manifest-path: packaging/flatpak/io.github.flow_tube.Flow-Desktop.yml
           bundle: Flow-Desktop.flatpak

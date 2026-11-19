@@ -7,9 +7,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::de::DeserializeOwned;
 
 use crate::sync::canonical::{
-    Hlc, Like, LikeKind, LikeState, Playlist, PlaylistItem, SubscriptionGroup, WatchHistoryRecord,
+    GroupMember, Hlc, Like, LikeKind, LikeState, Note, Playlist, PlaylistItem, SubscriptionGroup,
+    WatchHistoryRecord,
 };
 use crate::sync::changes::{self, Stamp};
+use crate::sync::mapping::like_key;
 use crate::sync::merge::playlist_merge_key;
 
 fn peer_record<T: DeserializeOwned>(stamp: &Stamp) -> Option<T> {
@@ -44,6 +46,19 @@ pub fn watch_history(
             })
         })
         .collect()
+}
+
+/// A like put back by Undo keeps its old time; a tombstone already at a peer would beat that, so
+/// a live like counts from its last edit.
+pub fn raise_live_likes(live: &mut [Like], stamps: &BTreeMap<String, Stamp>, device_id: &str) {
+    for like in live {
+        if let Some(s) = stamps.get(&like_key(like))
+            && !s.deleted
+            && s.at_ms > like.hlc.physical_ms
+        {
+            like.hlc = Hlc::new(s.at_ms, 0, device_id);
+        }
+    }
 }
 
 #[must_use]
@@ -92,16 +107,60 @@ pub fn groups(
         .collect()
 }
 
-/// Stamp each group with when it last changed here. A group with no recorded edit predates this
-/// tracking and gets the oldest stamp, so any real edit or deletion from a peer wins over it.
+#[must_use]
+pub fn notes(stamps: &BTreeMap<String, Stamp>, live: &BTreeSet<String>) -> Vec<Note> {
+    deletions(stamps, live)
+        .map(|(key, s)| {
+            peer_record(s).unwrap_or_else(|| Note {
+                id: key.clone(),
+                updated_at: i64::try_from(s.at_ms).unwrap_or(i64::MAX),
+                deleted: true,
+                ..Note::default()
+            })
+        })
+        .collect()
+}
+
+/// Stamp each group, and each of its channels, with when it last changed here, and add the
+/// channels removed here as tombstones. Anything with no recorded edit predates this tracking and
+/// gets the group's stamp, or the oldest one, so any real edit from a peer wins over it.
 pub fn stamp_groups(
     groups: &mut [SubscriptionGroup],
-    stamps: &BTreeMap<String, Stamp>,
+    group_stamps: &BTreeMap<String, Stamp>,
+    member_stamps: &BTreeMap<String, Stamp>,
     device_id: &str,
 ) {
     for g in groups {
-        let at = stamps.get(&g.name).map_or(0, |s| s.at_ms);
+        let at = group_stamps.get(&g.name).map_or(0, |s| s.at_ms);
         g.hlc = Hlc::new(at, 0, device_id);
+        let recorded: BTreeMap<&str, &Stamp> = changes::children(member_stamps, &g.name).collect();
+        let mut members: Vec<GroupMember> = g
+            .channel_ids
+            .iter()
+            .map(|channel_id| GroupMember {
+                channel_id: channel_id.clone(),
+                deleted: false,
+                hlc: Hlc::new(
+                    recorded
+                        .get(channel_id.as_str())
+                        .filter(|s| !s.deleted)
+                        .map_or(at, |s| s.at_ms),
+                    0,
+                    device_id,
+                ),
+            })
+            .collect();
+        for (channel_id, s) in recorded {
+            if s.deleted && !g.channel_ids.iter().any(|c| c == channel_id) {
+                members.push(peer_record(s).unwrap_or_else(|| GroupMember {
+                    channel_id: channel_id.to_owned(),
+                    deleted: true,
+                    hlc: Hlc::new(s.at_ms, 0, device_id),
+                }));
+            }
+        }
+        members.sort_by(|a, b| a.channel_id.cmp(&b.channel_id));
+        g.members = members;
     }
 }
 
@@ -127,11 +186,7 @@ pub fn playlists(
                 item.hlc = Hlc::new(s.at_ms, 0, device_id);
             }
         }
-        let prefix = format!("{}|", p.sync_id);
-        for (key, s) in item_stamps.range(prefix.clone()..) {
-            let Some(video_id) = key.strip_prefix(&prefix) else {
-                break;
-            };
+        for (video_id, s) in changes::children(item_stamps, &p.sync_id) {
             if !s.deleted || present.contains(video_id) {
                 continue;
             }

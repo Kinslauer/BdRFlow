@@ -1,7 +1,8 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { AlertTriangle, RotateCcw, Copy, ExternalLink, Check } from "lucide-react";
 import { getString } from "../../lib/i18n/index";
 import type { PlayerErrorInfo } from "../../lib/playerError";
+import { UpcomingCountdown } from "./UpcomingCountdown";
 
 export interface PlayerErrorStateProps {
   error: PlayerErrorInfo;
@@ -10,6 +11,8 @@ export interface PlayerErrorStateProps {
   onOpenInBrowser?: () => void;
   variant?: "overlay" | "compact";
   className?: string;
+  /** Shown under the countdown of a video that has not started. */
+  upcomingAction?: ReactNode;
 }
 
 const ACTION =
@@ -24,6 +27,7 @@ export function PlayerErrorState({
   onOpenInBrowser,
   variant = "overlay",
   className = "",
+  upcomingAction,
 }: PlayerErrorStateProps) {
   const [copied, setCopied] = useState(false);
 
@@ -96,6 +100,12 @@ export function PlayerErrorState({
       <p className="mx-auto mt-2 max-w-sm text-sm leading-relaxed text-chrome-neutral-400">
         {error.hint}
       </p>
+      {error.startsAtMs != null && (
+        <>
+          <UpcomingCountdown startsAtMs={error.startsAtMs} onDue={onRetry} />
+          {upcomingAction}
+        </>
+      )}
       <div className="mt-5">{actions}</div>
     </div>
   );

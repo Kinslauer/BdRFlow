@@ -26,6 +26,17 @@ export interface HomeSnapshot {
   error: string | null;
 }
 
+/** The snapshot's flags without its cards, sent when a change moved no card. */
+export type HomeStatus = Omit<HomeSnapshot, "cards" | "origins">;
+
+/** Cards added at the end of the feed, with the flags as they stand after them. */
+export interface HomeAppend extends HomeStatus {
+  /** How many cards the feed held before these. */
+  start: number;
+  cards: HomeCard[];
+  origins: Record<string, HomeOrigin>;
+}
+
 export const EMPTY_HOME_SNAPSHOT: HomeSnapshot = {
   generation: 0,
   cards: [],
@@ -68,9 +79,21 @@ export async function clearHomeFeed(): Promise<void> {
   await invokeBackend<void>("home_feed_clear");
 }
 
-export async function onHomeFeedChanged(handler: (snapshot: HomeSnapshot) => void): Promise<UnlistenFn> {
+export interface HomeFeedHandlers {
+  onSnapshot: (snapshot: HomeSnapshot) => void;
+  onStatus: (status: HomeStatus) => void;
+  onAppend: (append: HomeAppend) => void;
+}
+
+/** Every change to Home's feed: the whole snapshot, its flags alone, or a page added at its end. */
+export async function onHomeFeedChanged(handlers: HomeFeedHandlers): Promise<UnlistenFn> {
   if (!(await isTauriEnv())) return () => {};
-  return listen<HomeSnapshot>("home-feed", (event) => handler(event.payload));
+  const stops = await Promise.all([
+    listen<HomeSnapshot>("home-feed", (event) => handlers.onSnapshot(event.payload)),
+    listen<HomeStatus>("home-feed-status", (event) => handlers.onStatus(event.payload)),
+    listen<HomeAppend>("home-feed-append", (event) => handlers.onAppend(event.payload)),
+  ]);
+  return () => stops.forEach((stop) => stop());
 }
 
 /** One of the viewer's heaviest interests, named after the topic of it they watched most. */
@@ -83,18 +106,36 @@ export interface InterestChip {
   parts: InterestChip[];
 }
 
+/** A mix: the seed video, then what plays well after it. Played as a queue. */
+export interface HomeMix {
+  seed: VideoSummary;
+  videos: VideoSummary[];
+}
+
 export interface ChipFeed {
   cards: HomeCard[];
+  mixes: HomeMix[];
   failed: boolean;
 }
 
-export async function getHomeChips(): Promise<InterestChip[]> {
-  if (!(await isTauriEnv())) return [];
-  return invokeBackend<InterestChip[]>("home_feed_chips");
+/** The chips to offer: the viewer's interests, and which fixed ones have something to show. */
+export interface HomeChips {
+  interests: InterestChip[];
+  hasMixes: boolean;
+  hasWatched: boolean;
+  /** Chips whose latest result was empty, left out until it expires. */
+  empty: string[];
 }
 
-/** A chip's own videos: `interest:<key>`, `new` or `recent`. */
+export const NO_HOME_CHIPS: HomeChips = { interests: [], hasMixes: false, hasWatched: false, empty: [] };
+
+export async function getHomeChips(): Promise<HomeChips> {
+  if (!(await isTauriEnv())) return NO_HOME_CHIPS;
+  return invokeBackend<HomeChips>("home_feed_chips");
+}
+
+/** A chip's own content: `interest:<key>`, `new`, `recent`, `mixes`, `live` or `watched`. */
 export async function getHomeChipFeed(key: string, refresh: boolean): Promise<ChipFeed> {
-  if (!(await isTauriEnv())) return { cards: [], failed: false };
+  if (!(await isTauriEnv())) return { cards: [], mixes: [], failed: false };
   return invokeBackend<ChipFeed>("home_chip_feed", { key, refresh });
 }

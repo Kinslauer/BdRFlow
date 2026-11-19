@@ -1,11 +1,28 @@
 import { useState } from "react";
 import { formatCount } from "../../lib/utils";
 import { getString } from "../../lib/i18n/index";
-import { linkifyText } from "../../lib/linkify";
+import { hasTextSelection } from "../../lib/textSelection";
+import { LinkedText } from "./LinkedText";
+import { DescriptionExtras } from "./DescriptionExtras";
+import { DescriptionTags } from "./DescriptionTags";
+import { Copy } from "lucide-react";
+import { copyText } from "../../lib/clipboard";
+import { useUiStore } from "../../store/useUiStore";
 import type { DescriptionCardProps } from "./types";
 
-const formatViews = (views: string | number | null | undefined) =>
-  views ? `${formatCount(views)} views` : "0 views";
+// A live stream's count is YouTube's own "197 watching now", shown as sent.
+const formatViews = (views: string | number | null | undefined, isLive: boolean) => {
+  if (isLive && typeof views === "string" && views) return views;
+  return getString("watch_view_count", views ? formatCount(views) : "0");
+};
+
+async function copyDescription(description: string) {
+  const copied = await copyText(description);
+  useUiStore.getState().showToast({
+    variant: copied ? "success" : "error",
+    message: getString(copied ? "watch_description_copied" : "watch_description_copy_failed"),
+  });
+}
 
 export function DescriptionCard({ currentVideo, videoData }: DescriptionCardProps) {
   const [expanded, setExpanded] = useState(false);
@@ -16,17 +33,45 @@ export function DescriptionCard({ currentVideo, videoData }: DescriptionCardProp
 
   return (
     <div
-      onClick={() => setExpanded((value) => !value)}
+      onClick={() => {
+        if (!hasTextSelection()) setExpanded((value) => !value);
+      }}
       className="cursor-pointer rounded-xl bg-surface-container-low p-4 text-sm transition-colors hover:bg-surface-container"
     >
       <div className="flex items-center gap-2 font-medium text-chrome-neutral-200">
-        <span>{formatViews(viewCount)}</span>
-        {published && <span className="text-chrome-neutral-400">{published}</span>}
+        <span>{formatViews(viewCount, Boolean(videoData?.isLive))}</span>
+        {published && (
+          <span className="text-chrome-neutral-400" title={videoData?.relativePublishedText ?? undefined}>
+            {published}
+          </span>
+        )}
       </div>
 
-      <div className={`mt-2 whitespace-pre-wrap text-chrome-neutral-300 ${expanded ? "" : "line-clamp-3"}`}>
-        {description ? linkifyText(description) : <span className="text-chrome-neutral-500">{getString("watch_no_description")}</span>}
+      <div className={`mt-2 select-text whitespace-pre-wrap text-chrome-neutral-300 ${expanded ? "" : "line-clamp-3"}`}>
+        {description ? (
+          <LinkedText text={description} rich={videoData?.descriptionRich} />
+        ) : (
+          <span className="text-chrome-neutral-500">{getString("watch_no_description")}</span>
+        )}
       </div>
+
+      {expanded && videoData?.descriptionExtras && <DescriptionExtras extras={videoData.descriptionExtras} />}
+
+      {expanded && <DescriptionTags tags={videoData?.tags} category={videoData?.category} />}
+
+      {expanded && description && (
+        <button
+          type="button"
+          onClick={(event) => {
+            event.stopPropagation();
+            void copyDescription(description);
+          }}
+          className="mt-3 flex items-center gap-1.5 text-sm font-medium text-chrome-neutral-400 transition-colors duration-200 ease-out hover:text-chrome-neutral-100"
+        >
+          <Copy size={14} />
+          {getString("watch_copy_description")}
+        </button>
+      )}
 
       {description && (
         <span className="mt-2 inline-block font-medium text-chrome-neutral-400">

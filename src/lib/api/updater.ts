@@ -1,3 +1,6 @@
+import { appProxyUrl } from "../settings/appProxy";
+import { useAppSettingsStore } from "../../store/useAppSettingsStore";
+import { relaunchFlow } from "./process";
 import { isTauriEnv } from "./env";
 import { invokeBackend } from "./errors";
 import { parseUpdateSupport, type UpdateSupport } from "../updateSupport";
@@ -38,7 +41,8 @@ export function getUpdateSupport(): Promise<UpdateSupport> {
 export async function checkForAppUpdate(): Promise<Update | null> {
   if (!(await isTauriEnv())) return null;
   const { check } = await import("@tauri-apps/plugin-updater");
-  return check();
+  const proxy = appProxyUrl(useAppSettingsStore.getState().values);
+  return check(proxy ? { proxy } : undefined);
 }
 
 /**
@@ -74,6 +78,5 @@ export async function downloadAndInstallUpdate(
 /** Relaunches the app into the freshly installed build. */
 export async function relaunchApp(): Promise<void> {
   if (!(await isTauriEnv())) return;
-  const { relaunch } = await import("@tauri-apps/plugin-process");
-  await relaunch();
+  await relaunchFlow();
 }

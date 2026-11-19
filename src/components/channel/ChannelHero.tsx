@@ -1,101 +1,106 @@
 import React, { useState } from "react";
-import { Check } from "lucide-react";
+import { Check, Share2 } from "lucide-react";
+import { Button } from "../ui/Button";
 import { SubscribeButton } from "../ui/SubscribeButton";
+import { ChannelNote, ChannelNoteButton } from "../note/ChannelNote";
 import type { ChannelDetails } from "../../types/video";
+import { getString } from "../../lib/i18n/index";
 import { upgradeAvatarUrl, upgradeChannelBannerUrl } from "../../lib/thumbnails";
+import { shareLink } from "../../lib/clipboard";
 import { useProxiedImageUrl } from "../../lib/useProxiedImageUrl";
+import { youtubeChannelUrl } from "../../lib/youtubeUrl";
+import { useUiStore } from "../../store/useUiStore";
+import { joinIsolated } from "../../lib/direction";
 
 interface ChannelHeroProps {
-  channelInfo: ChannelDetails | null;
+  channelInfo: ChannelDetails;
+  /** Opens the About panel; without it the description expands in place. */
+  onOpenAbout?: () => void;
 }
 
-export const ChannelHero: React.FC<ChannelHeroProps> = ({
-  channelInfo,
-}) => {
-  const [descExpanded, setDescExpanded] = useState(false);
-  const bannerUrl = useProxiedImageUrl(upgradeChannelBannerUrl(channelInfo?.bannerUrl));
-  const avatarUrl = useProxiedImageUrl(upgradeAvatarUrl(channelInfo?.avatarUrl));
+async function shareChannel(channel: ChannelDetails) {
+  const result = await shareLink(channel.name, youtubeChannelUrl(channel.id));
+  const { showToast } = useUiStore.getState();
+  if (result === "copied") showToast({ variant: "success", message: getString("share_link_copied") });
+  if (result === "failed") showToast({ variant: "error", message: getString("share_link_copy_failed") });
+}
 
-  if (!channelInfo) return null;
+export const ChannelHero: React.FC<ChannelHeroProps> = ({ channelInfo, onOpenAbout }) => {
+  const [descExpanded, setDescExpanded] = useState(false);
+  const bannerUrl = useProxiedImageUrl(upgradeChannelBannerUrl(channelInfo.bannerUrl));
+  const avatarUrl = useProxiedImageUrl(upgradeAvatarUrl(channelInfo.avatarUrl));
+  const facts = [channelInfo.handle, channelInfo.subscriberCountText, channelInfo.videoCountText].filter(
+    (fact): fact is string => !!fact,
+  );
 
   return (
-    <div className="w-full flex flex-col bg-background">
-      {/* Banner */}
-      <div className="relative w-full h-48 md:h-64 bg-chrome-zinc-900">
-        {bannerUrl ? (
-          <img
-            src={bannerUrl}
-            alt="Channel banner"
-            className="w-full h-full object-cover"
-          />
-        ) : (
-          <div className="w-full h-full bg-chrome-zinc-800" />
+    <div className="flex w-full flex-col bg-background">
+      <div className="relative h-48 w-full bg-surface-container-low md:h-64">
+        {bannerUrl && (
+          <img src={bannerUrl} alt={getString("channel_banner_alt")} className="h-full w-full object-cover" />
         )}
-        {/* Bottom Gradient Blend */}
-        <div className="absolute bottom-0 left-0 right-0 h-1/4 bg-gradient-to-t from-background to-transparent" />
       </div>
 
-      {/* Profile Block (Overlapping) */}
-      <div className=" mx-auto w-full px-4 sm:px-6 lg:px-8">
-        <div className="flex flex-col md:flex-row md:items-end justify-between gap-6 pb-6 relative z-10">
-          
-          <div className="flex flex-col md:flex-row items-center md:items-end gap-6">
-            {/* Overlapping Avatar */}
-            <div className="w-32 h-32 rounded-full overflow-hidden border-4 border-background bg-chrome-zinc-800 shrink-0 -mt-16 md:-mt-16">
+      <div className="mx-auto w-full px-4 sm:px-6 lg:px-8">
+        <div className="relative z-10 flex flex-col justify-between gap-6 pb-6 md:flex-row md:items-end">
+          <div className="flex flex-col items-center gap-6 md:flex-row md:items-end">
+            <div className="-mt-16 h-32 w-32 shrink-0 overflow-hidden rounded-full border-4 border-background bg-surface-container-high">
               {avatarUrl ? (
-                <img
-                  src={avatarUrl}
-                  alt={channelInfo.name}
-                  className="w-full h-full object-cover"
-                />
+                <img src={avatarUrl} alt={channelInfo.name} className="h-full w-full object-cover" />
               ) : (
-                <div className="w-full h-full flex items-center justify-center text-4xl font-bold text-chrome-zinc-500">
+                <div className="flex h-full w-full items-center justify-center text-4xl font-bold text-chrome-neutral-500">
                   {channelInfo.name.charAt(0).toUpperCase()}
                 </div>
               )}
             </div>
 
-            {/* Metadata */}
-            <div className="text-center md:text-left space-y-1 mt-4 md:mt-0 pb-2">
-              <h1 className="text-4xl font-bold tracking-tight text-chrome-neutral-100 flex items-center justify-center md:justify-start gap-2">
+            <div className="mt-4 select-text space-y-1 pb-2 text-center md:mt-0 md:text-start">
+              <h1 dir="auto" className="flex items-center justify-center gap-2 text-4xl font-bold tracking-tight text-chrome-neutral-100 md:justify-start">
                 {channelInfo.name}
                 {channelInfo.verified && (
-                  <Check size={20} className="text-chrome-neutral-400 bg-chrome-neutral-800 rounded-full p-0.5" />
+                  <Check size={20} className="rounded-full bg-surface-container-high p-0.5 text-chrome-neutral-400" />
                 )}
               </h1>
-              <p className="text-chrome-neutral-400 font-medium">
-                {channelInfo.subscriberCountText || "YouTube Creator"} • 
-                <span className="ml-1">@{channelInfo.id}</span>
-              </p>
+              {facts.length > 0 && <p className="font-medium text-chrome-neutral-400">{joinIsolated(facts, " · ")}</p>}
             </div>
           </div>
 
-          {/* Action Row */}
-          <div className="flex items-center justify-center md:justify-end gap-3 w-full md:w-auto mt-4 md:mt-0 shrink-0 pb-2">
+          <div className="mt-4 flex w-full shrink-0 items-center justify-center gap-3 pb-2 md:mt-0 md:w-auto md:justify-end">
             <SubscribeButton
               channelId={channelInfo.id}
               channelName={channelInfo.name}
               avatarUrl={avatarUrl || undefined}
               size="md"
             />
+            <ChannelNoteButton channelInfo={channelInfo} />
+            <Button variant="tonal" onClick={() => void shareChannel(channelInfo)}>
+              <Share2 size={16} />
+              {getString("share")}
+            </Button>
           </div>
         </div>
 
-        {/* Description */}
+        <ChannelNote channelInfo={channelInfo} />
+
         {channelInfo.description && (
-          <div 
-            className="mb-8 cursor-pointer group"
-            onClick={() => setDescExpanded(!descExpanded)}
+          <button
+            type="button"
+            className="group mb-8 block max-w-3xl text-start"
+            onClick={() => (onOpenAbout ? onOpenAbout() : setDescExpanded((open) => !open))}
           >
-            <p className={`text-chrome-neutral-400 text-sm leading-relaxed ${descExpanded ? "" : "line-clamp-2"} group-hover:text-chrome-neutral-300 transition-colors max-w-3xl`}>
+            <span dir="auto"
+              className={`block text-sm leading-relaxed text-chrome-neutral-400 transition-colors group-hover:text-chrome-neutral-300 ${
+                descExpanded ? "whitespace-pre-wrap" : "line-clamp-2"
+              }`}
+            >
               {channelInfo.description}
-            </p>
-            {!descExpanded && channelInfo.description.length > 150 && (
-              <span className="text-chrome-neutral-500 text-xs font-semibold uppercase tracking-wider mt-1 block">
-                Show more
+            </span>
+            {!descExpanded && (
+              <span className="mt-1 block text-xs font-semibold text-chrome-neutral-500">
+                {getString("channel_about_more")}
               </span>
             )}
-          </div>
+          </button>
         )}
       </div>
     </div>

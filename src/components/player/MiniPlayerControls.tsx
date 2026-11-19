@@ -1,7 +1,15 @@
+import { getString } from "../../lib/i18n/index";
 import React, { useEffect, useRef } from "react";
 import { FastForward, Pause, Play, Rewind, SkipBack, SkipForward } from "lucide-react";
 import { usePlayerStore } from "../../store/usePlayerStore";
-import { PROGRESS_EVENTS, setStyleIfChanged, shouldAnimateProgress } from "../../lib/playerProgress";
+import {
+  PROGRESS_EVENTS,
+  cssPercent,
+  setStyleIfChanged,
+  shouldAnimateProgress,
+  snapToBarPixel,
+  watchBarSteps,
+} from "../../lib/playerProgress";
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
 
@@ -39,24 +47,27 @@ export const MiniPlayerControls: React.FC<MiniPlayerControlsProps> = ({
   const fillRef = useRef<HTMLDivElement>(null);
   const scrubbingRef = useRef(false);
 
-  // The mini bar is always on screen, so only a paused video skips the loop.
+  // The bar fades out with the rest of the controls, so it is only drawn every frame while
+  // they show. Hidden, it follows the media events and is current when it fades back in.
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
     let video = container.querySelector("video");
+    let steps = 0;
+    const stopWatchingWidth = watchBarSteps(trackRef.current, (next) => (steps = next));
     const update = () => {
       if (!video?.isConnected) video = container.querySelector("video");
       if (!video) return;
       const dur = video.duration || duration || 0;
-      const pct = dur > 0 ? clamp((video.currentTime / dur) * 100, 0, 100) : 0;
-      setStyleIfChanged(fillRef.current, "width", `${pct}%`);
+      const shown = snapToBarPixel(video.currentTime, dur, steps);
+      setStyleIfChanged(fillRef.current, "width", cssPercent(dur > 0 ? clamp((shown / dur) * 100, 0, 100) : 0));
     };
 
     update();
     const source = video;
     for (const event of PROGRESS_EVENTS) source?.addEventListener(event, update);
     let raf: number | null = null;
-    if (shouldAnimateProgress(isPlaying, true, false)) {
+    if (shouldAnimateProgress(isPlaying, shouldShowControls, false)) {
       const tick = () => {
         update();
         raf = requestAnimationFrame(tick);
@@ -65,9 +76,10 @@ export const MiniPlayerControls: React.FC<MiniPlayerControlsProps> = ({
     }
     return () => {
       if (raf !== null) cancelAnimationFrame(raf);
+      stopWatchingWidth();
       for (const event of PROGRESS_EVENTS) source?.removeEventListener(event, update);
     };
-  }, [containerRef, duration, isPlaying]);
+  }, [containerRef, duration, isPlaying, shouldShowControls]);
 
   const seekFromClientX = (clientX: number) => {
     const track = trackRef.current;
@@ -93,7 +105,7 @@ export const MiniPlayerControls: React.FC<MiniPlayerControlsProps> = ({
         shouldShowControls ? "opacity-100" : "opacity-0",
       )}
     >
-      <div className="pointer-events-auto" onClick={(event) => event.stopPropagation()}>
+      <div className="pointer-events-auto" data-drag-ignore="true" onClick={(event) => event.stopPropagation()}>
         {/* Progress bar */}
         <div
           ref={trackRef}
@@ -123,14 +135,14 @@ export const MiniPlayerControls: React.FC<MiniPlayerControlsProps> = ({
         {/* Transport row */}
         <div className="mt-0.5 flex items-center justify-center gap-2">
           {showNextPrevControls && (
-            <button type="button" title="Previous" onClick={playPrevious} className={sideBtn}>
+            <button type="button" title={getString('previous')} onClick={playPrevious} className={sideBtn}>
               <SkipBack size={16} fill="currentColor" />
             </button>
           )}
           {showSkipControls && (
             <button
               type="button"
-              title={`Back ${seekIntervalSeconds}s`}
+              title={getString('player_mini_back_seconds', seekIntervalSeconds)}
               onClick={() => skip(-seekIntervalSeconds)}
               className={sideBtn}
             >
@@ -139,7 +151,7 @@ export const MiniPlayerControls: React.FC<MiniPlayerControlsProps> = ({
           )}
           <button
             type="button"
-            title={isPlaying ? "Pause" : "Play"}
+            title={getString(isPlaying ? 'pause' : 'play')}
             onClick={togglePlay}
             className="grid h-11 w-11 place-items-center rounded-full bg-chrome-white/10 text-chrome-white transition-transform hover:bg-chrome-white/20 active:scale-95"
           >
@@ -152,7 +164,7 @@ export const MiniPlayerControls: React.FC<MiniPlayerControlsProps> = ({
           {showSkipControls && (
             <button
               type="button"
-              title={`Forward ${seekIntervalSeconds}s`}
+              title={getString('player_mini_forward_seconds', seekIntervalSeconds)}
               onClick={() => skip(seekIntervalSeconds)}
               className={sideBtn}
             >
@@ -160,7 +172,7 @@ export const MiniPlayerControls: React.FC<MiniPlayerControlsProps> = ({
             </button>
           )}
           {showNextPrevControls && (
-            <button type="button" title="Next" onClick={() => playNext()} className={sideBtn}>
+            <button type="button" title={getString('next')} onClick={() => playNext()} className={sideBtn}>
               <SkipForward size={16} fill="currentColor" />
             </button>
           )}

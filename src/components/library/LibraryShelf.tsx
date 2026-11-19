@@ -48,7 +48,7 @@ export const LibraryShelf: React.FC<LibraryShelfProps> = ({
 
         <Button variant="secondary" size="sm" onClick={() => navigate(viewAllTo)} className="gap-1 px-4 text-sm">
           {getString("library_view_all")}
-          <ChevronRight className="h-4 w-4" />
+          <ChevronRight className="h-4 w-4 rtl:-scale-x-100" />
         </Button>
       </div>
 
@@ -61,7 +61,7 @@ export const LibraryShelf: React.FC<LibraryShelfProps> = ({
           </p>
         </div>
       ) : (
-        <ShelfScroller className="flex gap-4 snap-x px-3 -mx-3 pt-3 -mt-2 pb-4">
+        <ShelfScroller className="flex gap-4 snap-x px-3 scroll-px-3 -mx-3 pt-3 -mt-2 pb-4">
           {children}
         </ShelfScroller>
       )}

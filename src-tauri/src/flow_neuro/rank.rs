@@ -4,6 +4,8 @@
 
 use std::collections::{HashMap, HashSet};
 
+use crate::api::innertube::json::count::parse_count;
+
 use crate::flow_neuro::categories::ChannelCategory;
 use crate::flow_neuro::clusters::{ClusterInputs, TopicCluster, build_clusters};
 use crate::flow_neuro::diversity::apply_smart_diversity;
@@ -18,8 +20,8 @@ use crate::flow_neuro::ranker::{
 };
 use crate::flow_neuro::scoring::{
     CHANNEL_SUPPRESSION_DAYS, COLD_START_THRESHOLD, ContentVector, FlowPersona, IdfSnapshot,
-    ONBOARDING_WARMUP_INTERACTIONS, ScoredVideo, TimeBucket, UserBrain, classify_persona,
-    is_known_short, time_bucket_confidence,
+    ONBOARDING_WARMUP_INTERACTIONS, ScoredVideo, TimeBucket, UserBrain,
+    calculate_cosine_similarity, classify_persona, is_known_short, time_bucket_confidence,
 };
 use crate::flow_neuro::specificity::specificity;
 use crate::flow_neuro::vector_math::{RECENT_SHARE, blend};
@@ -65,26 +67,7 @@ pub struct RankContext<'a> {
 /// "1.2M views" as a number; 0 when unknown.
 #[must_use]
 pub fn view_count_of(text: Option<&str>) -> u64 {
-    let Some(text) = text.map(str::to_lowercase) else {
-        return 0;
-    };
-    let digits: String = text
-        .chars()
-        .filter(|c| c.is_ascii_digit() || *c == '.')
-        .collect();
-    let number: f64 = digits.parse().unwrap_or(0.0);
-    let scale = if text.contains('m') {
-        1_000_000.0
-    } else if text.contains('k') {
-        1_000.0
-    } else if text.contains('b') {
-        1_000_000_000.0
-    } else {
-        1.0
-    };
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let count = (number * scale) as u64;
-    count
+    text.and_then(parse_count).unwrap_or(0)
 }
 
 fn channel_of(video: &VideoSummary) -> &str {
@@ -301,6 +284,30 @@ pub fn about(
         .collect()
 }
 
+/// How close each video reads to the viewer's overall taste, from 0 to 1.
+#[must_use]
+pub fn taste_affinity(ctx: &RankContext, videos: &[VideoSummary]) -> HashMap<String, f64> {
+    let brain = ctx.brain;
+    let idf = IdfSnapshot {
+        word_frequencies: brain.idf_word_frequency.clone(),
+        total_documents: brain.idf_total_documents,
+    };
+    let reader = TopicReader {
+        spec: brain.key_spec(),
+        idf: &idf,
+    };
+    videos
+        .iter()
+        .map(|video| {
+            let vector = vector_of(ctx, video, &reader);
+            (
+                video.id.clone(),
+                calculate_cosine_similarity(&brain.global_vector, &vector).clamp(0.0, 1.0),
+            )
+        })
+        .collect()
+}
+
 /// `ranked` with its places shared between the viewer's lasting interests, so the strongest one
 /// does not fill every page.
 #[must_use]
@@ -449,6 +456,7 @@ mod tests {
             view_count_text: Some("12K views".into()),
             channel_avatar_url: None,
             is_live: false,
+            ..Default::default()
         }
     }
 

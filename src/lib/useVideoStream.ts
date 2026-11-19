@@ -1,9 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import type { Projection } from "./spherical/view";
 import { usePlayerStore } from "../store/usePlayerStore";
 import { invalidateStreamInfo, resolveStreamInfo } from "./streamResolution";
 import { classifyPlayerError } from "./playerError";
 import { recordPlayerEvent } from "./playerDiagnostics";
 import { getOfflineStream } from "./api/downloads";
+import { getLocalCover, getLocalStream } from "./api/localMedia";
+import { isLocalMediaId } from "./localMediaId";
+import { LOCAL_FORMAT_UNSUPPORTED, localPlaybackError } from "./localMedia/playability";
 import { findDownloadedRecord } from "./useDownloads";
 import { useDownloadsLibraryStore } from "../store/useDownloadsLibraryStore";
 import { addWatchRecord } from "./api/db";
@@ -12,8 +16,19 @@ import { SETTINGS } from "./settings/schema";
 import { filterByPreferredCodec, selectPreferredStreamVariant } from "./settings/playerRuntime";
 import { codecRank } from "./codecPreference";
 import { shouldRecordWatchHistory } from "./deepFlow";
+import { recoveryPosition } from "./playerProgress";
+import { recordAutoReResolve, shouldAutoReResolve, type ReResolveHistory } from "./videoRecoveryPolicy";
+import { isFinishedPosition, resumeStartSeconds } from "./resumePolicy";
 import { useAppSettingsStore } from "../store/useAppSettingsStore";
-import type { AudioTrack, CaptionTrack, StreamInfo, StreamVariant, VideoSummary } from "../types/video";
+import type {
+  AudioTrack,
+  CaptionTrack,
+  StoryboardLevel,
+  StreamInfo,
+  StreamVariant,
+  VideoSummary,
+} from "../types/video";
+import { profileStorage } from "./storage/profileStorage";
 
 export type SourceMode = "hls" | "dash-native" | "sabr-dash" | "direct" | "unavailable";
 
@@ -24,13 +39,11 @@ type SavedWatchProgress = { currentTime: number; duration: number; updatedAt: nu
 
 export const readSavedWatchProgress = (videoId: string, fallbackDuration = 0): number => {
   try {
-    const raw = localStorage.getItem(getProgressKey(videoId));
+    const raw = profileStorage.getItem(getProgressKey(videoId));
     if (!raw) return 0;
     const progress = JSON.parse(raw) as SavedWatchProgress;
     const duration = progress.duration || fallbackDuration || 0;
-    if (!Number.isFinite(progress.currentTime) || progress.currentTime < 5) return 0;
-    if (duration > 0 && progress.currentTime >= Math.max(0, duration - 12)) return 0;
-    return Math.max(0, progress.currentTime);
+    return resumeStartSeconds(progress.currentTime, duration);
   } catch (error) {
     console.warn("Failed to read saved watch progress", error);
     return 0;
@@ -40,11 +53,11 @@ export const readSavedWatchProgress = (videoId: string, fallbackDuration = 0): n
 export const saveLocalWatchProgress = (videoId: string, currentTime: number, duration: number) => {
   if (!Number.isFinite(currentTime) || currentTime < 0) return;
   try {
-    if (duration > 0 && currentTime >= Math.max(0, duration - 12)) {
-      localStorage.removeItem(getProgressKey(videoId));
+    if (isFinishedPosition(currentTime, duration)) {
+      profileStorage.removeItem(getProgressKey(videoId));
       return;
     }
-    localStorage.setItem(
+    profileStorage.setItem(
       getProgressKey(videoId),
       JSON.stringify({ currentTime, duration, updatedAt: Date.now() } satisfies SavedWatchProgress),
     );
@@ -53,9 +66,15 @@ export const saveLocalWatchProgress = (videoId: string, currentTime: number, dur
   }
 };
 
+/** Where a library file picks up: nowhere near its very start or end. Mirrors saved progress. */
+const localResumeSeconds = (positionSeconds: number, durationSeconds: number): number => {
+  if (positionSeconds < 5) return 0;
+  return durationSeconds > 0 && positionSeconds >= Math.max(0, durationSeconds - 12) ? 0 : positionSeconds;
+};
+
 export const clearLocalWatchProgress = (videoId: string) => {
   try {
-    localStorage.removeItem(getProgressKey(videoId));
+    profileStorage.removeItem(getProgressKey(videoId));
   } catch (error) {
     console.warn("Failed to clear watch progress", error);
   }
@@ -72,8 +91,12 @@ const resolveHandoff = (video: VideoSummary, isLive: boolean) => {
   if (handoff) {
     return { resumeTime: isLive ? 0 : handoff.positionSeconds, playing: handoff.playing };
   }
+  // A video the queue moved to starts from the top; only one the viewer picked resumes. A reload of
+  // one already playing, after a quality change say, keeps its place.
+  const { queueAdvanceVideoId, playbackStartedVideoId } = usePlayerStore.getState();
+  const reachedByQueue = queueAdvanceVideoId === video.id && playbackStartedVideoId !== video.id;
   return {
-    resumeTime: isLive ? 0 : readSavedWatchProgress(video.id, video.durationSeconds ?? 0),
+    resumeTime: isLive || reachedByQueue ? 0 : readSavedWatchProgress(video.id, video.durationSeconds ?? 0),
     playing: true,
   };
 };
@@ -151,11 +174,24 @@ const pickDirectVariantUrl = (info: StreamInfo, qualityId: string, preferredCode
   return chosen?.localUrl || info.localUrl || null;
 };
 
+/** Fresh links walk the whole client ladder; past this the retry reports an error. */
+const HARD_RETRY_TIMEOUT_MS = 60_000;
+
+const NO_SOURCE_MESSAGE = "No playable source was returned for this video.";
+
 export interface VideoStream {
   streamUrl: string | null;
+  /** The video the current source belongs to; null while a new one resolves. */
+  streamVideoId: string | null;
   streamVariants: StreamVariant[];
   captions: CaptionTrack[];
   audioTracks: AudioTrack[];
+  /** Seek-bar preview sheets. */
+  storyboard: StoryboardLevel[];
+  /** How the current 360 video maps onto its sphere, or null for a flat one. */
+  projection: Projection | null;
+  /** How many dB louder than the site's target the video plays. */
+  loudnessDb: number | null;
   dashManifestUrl: string | null;
   hlsManifestUrl: string | null;
   isLive: boolean;
@@ -165,7 +201,11 @@ export interface VideoStream {
   loadingStream: boolean;
   streamError: string | null;
   streamErrorKind: string | null;
+  /** When an upcoming premiere or stream starts, in epoch milliseconds. */
+  streamStartsAtMs: number | null;
   setResumeTime: (time: number) => void;
+  /** Reports a published playback position, which recoveries resume from. */
+  notePlaybackTime: (time: number) => void;
   onSelectQuality: (variant: StreamVariant | "auto") => void;
   onRetrySource: (reason: string) => void;
   onHardRetry: () => void;
@@ -180,22 +220,38 @@ export function useVideoStream(videoId: string | undefined): VideoStream {
   const currentVideo = usePlayerStore((s) => s.currentVideo);
   const setIsPlaying = usePlayerStore((s) => s.setIsPlaying);
   const setCaptionsInStore = usePlayerStore((s) => s.setCaptions);
+  const captionsInStore = usePlayerStore((s) => s.captions);
   const preferredQuality = useAppSettingsStore((s) => s.values[SETTINGS.DEFAULT_QUALITY_WIFI] ?? "1080p");
   const preferredCodec = useAppSettingsStore((s) => s.values[SETTINGS.DEFAULT_VIDEO_CODEC] ?? "H.264");
 
   const [streamUrl, setStreamUrl] = useState<string | null>(null);
+  const [streamVideoId, setStreamVideoId] = useState<string | null>(null);
   const [streamVariants, setStreamVariants] = useState<StreamVariant[]>([]);
   const [captions, setCaptions] = useState<CaptionTrack[]>([]);
   const [audioTracks, setAudioTracks] = useState<AudioTrack[]>([]);
+  const [storyboard, setStoryboard] = useState<StoryboardLevel[]>([]);
+  const [projection, setProjection] = useState<Projection | null>(null);
+  const [loudnessDb, setLoudnessDb] = useState<number | null>(null);
   const [dashManifestUrl, setDashManifestUrl] = useState<string | null>(null);
   const [hlsManifestUrl, setHlsManifestUrl] = useState<string | null>(null);
   const [isLive, setIsLive] = useState(false);
   const [sourceMode, setSourceMode] = useState<SourceMode>("unavailable");
   const [selectedQualityId, setSelectedQualityId] = useState<string>("auto");
   const [resumeTime, setResumeTime] = useState(0);
+  const reResolveHistoryRef = useRef<ReResolveHistory | null>(null);
+  // The store's clock is not a safe resume point: it belongs to whatever the
+  // element last played, and a swap can leave it at 0. Recoveries resume from
+  // the position handed to the current source until that source has played.
+  const lastPlayedTimeRef = useRef(0);
+  const pendingResumeRef = useRef<number | null>(null);
+  const hardRetryRef = useRef<() => void>(() => undefined);
+  // While fresh links resolve, the old source's failures are expected; switching
+  // modes on them would load the links the retry is replacing.
+  const hardRetryInFlightRef = useRef(false);
   const [loadingStream, setLoadingStream] = useState(false);
   const [streamError, setStreamError] = useState<string | null>(null);
   const [streamErrorKind, setStreamErrorKind] = useState<string | null>(null);
+  const [streamStartsAtMs, setStreamStartsAtMs] = useState<number | null>(null);
 
   const streamInfoRef = useRef<StreamInfo | null>(null);
   const attemptedModesRef = useRef<Set<SourceMode>>(new Set());
@@ -203,6 +259,16 @@ export function useVideoStream(videoId: string | undefined): VideoStream {
   // Resolution is asynchronous and a user can switch videos mid-flight; only the
   // newest load may write state, so a late answer never overwrites a newer one.
   const loadTokenRef = useRef(0);
+
+  const handResumeToSource = useCallback((time: number) => {
+    pendingResumeRef.current = time > 0 ? time : null;
+    setResumeTime(time);
+  }, []);
+  const positionNow = () => recoveryPosition(lastPlayedTimeRef.current, pendingResumeRef.current);
+  const notePlaybackTime = useCallback((time: number) => {
+    lastPlayedTimeRef.current = time;
+    pendingResumeRef.current = null;
+  }, []);
 
   const publishCaptions = useCallback(
     (tracks: CaptionTrack[]) => {
@@ -212,12 +278,48 @@ export function useVideoStream(videoId: string | undefined): VideoStream {
     [setCaptionsInStore],
   );
 
+  /** A library file plays straight from disk: one source, no network, nothing to record. */
+  const playLocalFile = useCallback(
+    async (video: VideoSummary, isCurrentLoad: () => boolean) => {
+      const local = await getLocalStream(video.id);
+      if (!isCurrentLoad()) return;
+      const problem = localPlaybackError(local);
+      if (problem) throw problem;
+      streamInfoRef.current = null;
+      attemptedModesRef.current = new Set(["direct"]);
+      setSelectedQualityId("auto");
+      if (!video.title) {
+        usePlayerStore.getState().enrichCurrentVideo(video.id, {
+          title: local.title,
+          channelName: local.artist,
+          durationSeconds: Math.round(local.durationSeconds),
+        });
+      }
+      const handoff = usePlayerStore.getState().consumePipHandoff(video.id);
+      handResumeToSource(
+        handoff ? handoff.positionSeconds : localResumeSeconds(local.positionSeconds, local.durationSeconds),
+      );
+      setSourceMode("direct");
+      setStreamUrl(local.url);
+      setStreamVideoId(video.id);
+      publishCaptions(local.captions);
+      setIsPlaying(handoff ? handoff.playing : true);
+      if (!video.thumbnailUrl) {
+        void getLocalCover(video.id).then((cover) => {
+          if (cover) usePlayerStore.getState().enrichCurrentVideo(video.id, { thumbnailUrl: cover });
+        }, () => {});
+      }
+    },
+    [handResumeToSource, publishCaptions, setIsPlaying],
+  );
+
   useEffect(() => {
     const currentVideo = usePlayerStore.getState().currentVideo;
     if (!currentVideo || currentVideo.id !== videoId) return;
 
     const loadToken = ++loadTokenRef.current;
     const isCurrentLoad = () => loadTokenRef.current === loadToken;
+    hardRetryInFlightRef.current = false;
 
     const loadStream = async () => {
       setLoadingStream(true);
@@ -226,15 +328,25 @@ export function useVideoStream(videoId: string | undefined): VideoStream {
       stallExhaustedCyclesRef.current = 0;
       recordPlayerEvent(`video resolve start: ${currentVideo.id}`);
       setStreamUrl(null);
+      setStreamVideoId(null);
       setDashManifestUrl(null);
       setHlsManifestUrl(null);
       setAudioTracks([]);
+      setStoryboard([]);
+      setProjection(null);
+      setLoudnessDb(null);
       setStreamVariants([]);
       publishCaptions([]);
       setIsLive(false);
       setSourceMode("unavailable");
-      setResumeTime(0);
+      lastPlayedTimeRef.current = 0;
+      handResumeToSource(0);
       try {
+        if (isLocalMediaId(currentVideo.id)) {
+          await playLocalFile(currentVideo, isCurrentLoad);
+          return;
+        }
+
         // The downloads library is a SQLite read and stream resolution is a
         // network round trip. When the library still has to load, overlap the
         // two instead of paying them back to back — first frame only ever waits
@@ -258,9 +370,11 @@ export function useVideoStream(videoId: string | undefined): VideoStream {
             attemptedModesRef.current = new Set(["direct"]);
             setSelectedQualityId("auto");
             const offlineHandoff = resolveHandoff(currentVideo, false);
-            setResumeTime(offlineHandoff.resumeTime);
+            handResumeToSource(offlineHandoff.resumeTime);
             setSourceMode("direct");
             setStreamUrl(offline.url);
+            setStreamVideoId(currentVideo.id);
+            publishCaptions(offline.captions ?? []);
             setIsPlaying(offlineHandoff.playing);
             if (shouldRecordWatchHistory()) {
               void addWatchRecord({
@@ -287,6 +401,9 @@ export function useVideoStream(videoId: string | undefined): VideoStream {
         setStreamVariants(info.variants || []);
         publishCaptions(info.captions || []);
         setAudioTracks(info.audioTracks || []);
+        setStoryboard(info.storyboard ?? []);
+        setProjection(info.projection ?? null);
+        setLoudnessDb(info.loudnessDb ?? null);
         setIsLive(!!info.isLive);
 
         const canUseAdaptive = (info.audioTracks || []).some((track) => !!track.localUrl);
@@ -302,7 +419,7 @@ export function useVideoStream(videoId: string | undefined): VideoStream {
 
         // A live broadcast has no meaningful resume point.
         const handoff = resolveHandoff(currentVideo, !!info.isLive);
-        setResumeTime(handoff.resumeTime);
+        handResumeToSource(handoff.resumeTime);
 
         const availableModes = computeAvailableSourceModes(info);
         const initialMode: SourceMode = availableModes[0] || "unavailable";
@@ -310,11 +427,7 @@ export function useVideoStream(videoId: string | undefined): VideoStream {
         setSourceMode(initialMode);
 
         if (initialMode === "unavailable") {
-          setStreamError(
-            info.isLive
-              ? "This live broadcast did not return a playable manifest."
-              : "No playable source was returned for this video.",
-          );
+          setStreamError(info.isLive ? "This live broadcast did not return a playable manifest." : NO_SOURCE_MESSAGE);
           setStreamErrorKind("streaming");
           recordPlayerEvent(`video resolve produced no source (live=${info.isLive})`);
           return;
@@ -337,6 +450,7 @@ export function useVideoStream(videoId: string | undefined): VideoStream {
           setDashManifestUrl(null);
           setStreamUrl(pickDirectVariantUrl(info, initialQualityId, preferredCodec));
         }
+        setStreamVideoId(currentVideo.id);
 
         setIsPlaying(handoff.playing);
 
@@ -361,6 +475,9 @@ export function useVideoStream(videoId: string | undefined): VideoStream {
         setStreamVariants([]);
         publishCaptions([]);
         setAudioTracks([]);
+        setStoryboard([]);
+        setProjection(null);
+        setLoudnessDb(null);
         setDashManifestUrl(null);
         setHlsManifestUrl(null);
         setIsLive(false);
@@ -368,6 +485,7 @@ export function useVideoStream(videoId: string | undefined): VideoStream {
         const info = classifyPlayerError(err);
         setStreamError(info.rawMessage);
         setStreamErrorKind(info.kind);
+        setStreamStartsAtMs(info.startsAtMs ?? null);
         recordPlayerEvent(`video resolve failed: ${info.kind} (${info.rawMessage})`);
         console.error("Failed to load stream URL", err);
       } finally {
@@ -377,7 +495,7 @@ export function useVideoStream(videoId: string | undefined): VideoStream {
 
     void loadStream();
     return () => { ++loadTokenRef.current; };
-  }, [currentVideo?.id, videoId, setIsPlaying, publishCaptions, preferredCodec, preferredQuality]);
+  }, [currentVideo?.id, videoId, setIsPlaying, publishCaptions, preferredCodec, preferredQuality, handResumeToSource, playLocalFile]);
 
   const onSelectQuality = useCallback(
     (variant: StreamVariant | "auto") => {
@@ -388,7 +506,7 @@ export function useVideoStream(videoId: string | undefined): VideoStream {
         const canUseAdaptive = audioTracks.some((track) => !!track.localUrl);
         const chosenVariant = selectVariantByBandwidth(streamVariants, canUseAdaptive, preferredCodec);
         if (chosenVariant) {
-          setResumeTime(usePlayerStore.getState().currentTime);
+          handResumeToSource(positionNow());
           setStreamUrl(chosenVariant.localUrl);
         }
         return;
@@ -402,23 +520,52 @@ export function useVideoStream(videoId: string | undefined): VideoStream {
         setIsPlaying(true);
         return;
       }
-      setResumeTime(usePlayerStore.getState().currentTime);
+      handResumeToSource(positionNow());
       setSelectedQualityId(variant.id);
       setStreamUrl(variant.localUrl);
       setIsPlaying(true);
     },
-    [audioTracks, dashManifestUrl, preferredCodec, setIsPlaying, streamVariants],
+    [audioTracks, dashManifestUrl, preferredCodec, setIsPlaying, streamVariants, handResumeToSource],
   );
 
   const onRetrySource = useCallback(
     (reason: string) => {
+      if (isLocalMediaId(usePlayerStore.getState().currentVideo?.id)) {
+        // One source, read from disk: a media error means it can't be read, so there is nothing
+        // to fall back to, and a stall on a slow drive is left to catch up.
+        if (reason.startsWith("media-error")) {
+          recordPlayerEvent(`local file refused by the media element (${reason})`);
+          setStreamError(`Media element refused the file (${reason})`);
+          setStreamErrorKind(LOCAL_FORMAT_UNSUPPORTED);
+        }
+        return;
+      }
       const info = streamInfoRef.current;
-      if (!info) return;
+      if (!info || hardRetryInFlightRef.current) return;
       const available = computeAvailableSourceModes(info);
-      const resumeAt = usePlayerStore.getState().currentTime || 0;
+      const resumeAt = positionNow();
 
       attemptedModesRef.current.add(sourceMode);
       const next = available.find((mode) => !attemptedModesRef.current.has(mode));
+
+      // Fresh links before another source mode: one built from the same links
+      // fails the same way.
+      const videoId = usePlayerStore.getState().currentVideo?.id;
+      const attempt = {
+        videoId: videoId ?? "",
+        position: resumeAt,
+        isLive: !!info.isLive,
+        sourcePlayed: pendingResumeRef.current === null && lastPlayedTimeRef.current > 0,
+        hasNextSource: !!next,
+      };
+      if (videoId && shouldAutoReResolve(reResolveHistoryRef.current, attempt)) {
+        reResolveHistoryRef.current = recordAutoReResolve(reResolveHistoryRef.current, videoId, resumeAt);
+        recordPlayerEvent(
+          `video auto re-resolve ${reResolveHistoryRef.current.count} after ${reason} at ${Math.round(resumeAt)}s`,
+        );
+        hardRetryRef.current();
+        return;
+      }
       console.warn("[Watch] source-mode fallback", { reason, from: sourceMode, next, available });
       recordPlayerEvent(`video source fallback: ${reason} from=${sourceMode} next=${next ?? "none"}`);
 
@@ -443,7 +590,7 @@ export function useVideoStream(videoId: string | undefined): VideoStream {
       }
 
       attemptedModesRef.current.add(next);
-      setResumeTime(info.isLive ? 0 : resumeAt);
+      handResumeToSource(info.isLive ? 0 : resumeAt);
       setSourceMode(next);
       if (next === "hls") {
         setHlsManifestUrl(info.hlsManifestUrl || null);
@@ -463,30 +610,58 @@ export function useVideoStream(videoId: string | undefined): VideoStream {
         setStreamUrl(pickDirectVariantUrl(info, selectedQualityId || "auto", preferredCodec));
       }
     },
-    [sourceMode, selectedQualityId, preferredCodec],
+    [sourceMode, selectedQualityId, preferredCodec, handResumeToSource],
   );
 
   const onHardRetry = useCallback(() => {
     if (!currentVideo) return;
+    const resumeAt = streamInfoRef.current?.isLive ? 0 : positionNow();
+    // Shares the first load's token, so switching videos drops a late answer.
+    const loadToken = ++loadTokenRef.current;
+    const isCurrentLoad = () => loadTokenRef.current === loadToken;
+    hardRetryInFlightRef.current = true;
+    setLoadingStream(true);
     setStreamUrl(null);
     setStreamVariants([]);
     publishCaptions([]);
     setAudioTracks([]);
+    setStoryboard([]);
+    setProjection(null);
+    setLoudnessDb(null);
     setSelectedQualityId("auto");
     setStreamError(null);
     setStreamErrorKind(null);
     stallExhaustedCyclesRef.current = 0;
     recordPlayerEvent(`video hard retry: ${currentVideo.id}`);
+    if (isLocalMediaId(currentVideo.id)) {
+      void playLocalFile(currentVideo, isCurrentLoad)
+        .catch((err) => {
+          if (!isCurrentLoad()) return;
+          const info = classifyPlayerError(err);
+          setStreamError(info.rawMessage);
+          setStreamErrorKind(info.kind);
+        })
+        .finally(() => {
+          if (!isCurrentLoad()) return;
+          hardRetryInFlightRef.current = false;
+          setLoadingStream(false);
+        });
+      return;
+    }
     // A hard retry exists because the resolved URLs stopped working, so it has
     // to walk a fresh client ladder rather than be handed the same answer again.
     invalidateStreamInfo(currentVideo.id);
-    void resolveStreamInfo(currentVideo.id, { refresh: true })
+    void resolveStreamInfo(currentVideo.id, { refresh: true, timeoutMs: HARD_RETRY_TIMEOUT_MS })
       .then((info) => {
+        if (!isCurrentLoad()) return;
         streamInfoRef.current = info;
         attemptedModesRef.current = new Set();
         setStreamVariants(info.variants || []);
         publishCaptions(info.captions || []);
         setAudioTracks(info.audioTracks || []);
+        setStoryboard(info.storyboard ?? []);
+        setProjection(info.projection ?? null);
+        setLoudnessDb(info.loudnessDb ?? null);
         setIsLive(!!info.isLive);
         const canUseAdaptive = (info.audioTracks || []).some((track) => !!track.localUrl);
         const preferredVariant = selectPreferredStreamVariant(
@@ -499,11 +674,18 @@ export function useVideoStream(videoId: string | undefined): VideoStream {
         setSelectedQualityId(initialQualityId);
         setStreamError(null);
         setStreamErrorKind(null);
+        handResumeToSource(resumeAt);
 
         const mode = computeAvailableSourceModes(info)[0] || "unavailable";
         attemptedModesRef.current.add(mode);
         setSourceMode(mode);
-        if (mode === "hls") {
+        if (mode === "unavailable") {
+          setHlsManifestUrl(null);
+          setDashManifestUrl(null);
+          setStreamError(NO_SOURCE_MESSAGE);
+          setStreamErrorKind("streaming");
+          recordPlayerEvent("video hard retry produced no source");
+        } else if (mode === "hls") {
           setHlsManifestUrl(info.hlsManifestUrl || null);
           setDashManifestUrl(null);
           setStreamUrl(null);
@@ -522,18 +704,31 @@ export function useVideoStream(videoId: string | undefined): VideoStream {
         }
       })
       .catch((err) => {
+        if (!isCurrentLoad()) return;
         const info = classifyPlayerError(err);
         setStreamError(info.rawMessage);
         setStreamErrorKind(info.kind);
+        setStreamStartsAtMs(info.startsAtMs ?? null);
         recordPlayerEvent(`video hard retry failed: ${info.kind} (${info.rawMessage})`);
+      })
+      .finally(() => {
+        if (!isCurrentLoad()) return;
+        hardRetryInFlightRef.current = false;
+        setLoadingStream(false);
       });
-  }, [currentVideo, preferredCodec, preferredQuality, publishCaptions]);
+  }, [currentVideo, preferredCodec, preferredQuality, publishCaptions, handResumeToSource, playLocalFile]);
+  hardRetryRef.current = onHardRetry;
 
   return {
     streamUrl,
+    streamVideoId,
     streamVariants,
-    captions,
+    // A subtitle file picked for a library video joins through the store.
+    captions: isLocalMediaId(videoId) ? captionsInStore : captions,
     audioTracks,
+    storyboard,
+    projection,
+    loudnessDb,
     dashManifestUrl,
     hlsManifestUrl,
     isLive,
@@ -543,7 +738,9 @@ export function useVideoStream(videoId: string | undefined): VideoStream {
     loadingStream,
     streamError,
     streamErrorKind,
+    streamStartsAtMs,
     setResumeTime,
+    notePlaybackTime,
     onSelectQuality,
     onRetrySource,
     onHardRetry,

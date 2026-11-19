@@ -1,0 +1,53 @@
+import { useState } from "react";
+import { Moon } from "lucide-react";
+
+import { getString } from "../../lib/i18n/index";
+import { SETTINGS } from "../../lib/settings/schema";
+import { useBoolPref } from "../../lib/usePreference";
+import { useSleepTimerStore } from "../../store/useSleepTimerStore";
+import { AnchoredPortalMenu, type MenuAnchor } from "../ui/AnchoredPortalMenu";
+import { SleepTimerPanel } from "../sleep/SleepTimerPanel";
+import { HapticButton } from "./HapticButton";
+import { alignToEnd } from "../../lib/direction";
+
+interface MusicSleepTimerButtonProps {
+  className: string;
+  /** The look of the button while a timer is set, as the player's other toggles show "on". */
+  activeClassName: string;
+  /** Shown whatever the full player's switch says, because the user put it in the mini player. */
+  always?: boolean;
+  iconClassName?: string;
+}
+
+/** The music player's optional sleep timer button (a setting, off by default, as on Android). */
+export function MusicSleepTimerButton({ className, activeClassName, always = false, iconClassName = "h-5 w-5" }: MusicSleepTimerButtonProps) {
+  const [enabled] = useBoolPref(SETTINGS.MUSIC_SLEEP_TIMER_BUTTON, false);
+  const active = useSleepTimerStore((s) => s.mode !== "off");
+  const [anchor, setAnchor] = useState<MenuAnchor | null>(null);
+  if (!enabled && !always) return null;
+
+  return (
+    <>
+      <HapticButton
+        onClick={(event) => {
+          const rect = event.currentTarget.getBoundingClientRect();
+          setAnchor({ top: rect.bottom + 6, flipBottom: rect.top - 6, ...alignToEnd(rect) });
+        }}
+        aria-label={getString("sleep_timer")}
+        aria-pressed={active}
+        className={active ? activeClassName : className}
+      >
+        <Moon className={iconClassName} />
+      </HapticButton>
+      {anchor && (
+        <AnchoredPortalMenu
+          anchor={anchor}
+          onClose={() => setAnchor(null)}
+          className="z-[70] w-72 rounded-xl border border-chrome-neutral-800 bg-surface-container-high p-2"
+        >
+          <SleepTimerPanel tone="music" onDone={() => setAnchor(null)} />
+        </AnchoredPortalMenu>
+      )}
+    </>
+  );
+}

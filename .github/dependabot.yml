@@ -17,6 +17,19 @@ updates:
           - minor
           - patch
 
+  # The Tauri CLI the updater signing jobs install, on its own so each bump is
+  # reviewed apart from the app's dependencies.
+  - package-ecosystem: npm
+    directory: /.github/signing
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:05"
+      timezone: Asia/Beirut
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 2
+
   - package-ecosystem: cargo
     directory: /src-tauri
     schedule:
@@ -25,6 +38,12 @@ updates:
       time: "06:15"
       timezone: Asia/Beirut
     open-pull-requests-limit: 10
+    ignore:
+      # windows-core must match the version the `windows` crate is built on, and
+      # windows-rs 0.100 shipped windows-core without `windows`. Move both together
+      # once `windows` 0.100 is out, then drop this rule.
+      - dependency-name: windows-core
+        versions: [">=0.63"]
     groups:
       compatible-updates:
         patterns:
@@ -34,12 +53,18 @@ updates:
           - patch
 
   - package-ecosystem: github-actions
-    directory: /
+    # "/" covers .github/workflows; local composite actions are listed apart.
+    directories:
+      - /
+      - /.github/actions/*
     schedule:
       interval: weekly
       day: monday
       time: "06:30"
       timezone: Asia/Beirut
+    # A new action release waits a week before it is proposed.
+    cooldown:
+      default-days: 7
     open-pull-requests-limit: 10
     groups:
       action-updates:

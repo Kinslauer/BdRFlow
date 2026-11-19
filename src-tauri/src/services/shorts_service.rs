@@ -1,3 +1,4 @@
+use crate::api::innertube::extractors::channel::SHORTS_TAB_PARAMS;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Mutex;
 use std::time::Duration;
@@ -14,9 +15,6 @@ use crate::models::video::VideoSummary;
 use crate::services::recommendation_service::{DiscoverySurface, RecommendationService};
 use crate::services::youtube_service::YoutubeService;
 
-/// Channel "Shorts" tab browse params — the videos-tab token with `videos`
-/// swapped for `shorts` (`EgZ2aWRlb3PyBgQKAjoA` → `EgZzaG9ydHPyBgQKAjoA`).
-const SHORTS_TAB_PARAMS: &str = "EgZzaG9ydHPyBgQKAjoA";
 const FLOW_DISCOVERY_CONTINUATION: &str = "flow:shorts:discovery";
 
 /// Shorts handed back per page.
@@ -388,14 +386,17 @@ impl ShortsService {
         let mut candidates: Vec<VideoSummary> = Vec::new();
         let mut continuation = None;
 
+        let mut reels = Vec::new();
         if let Ok(feed) = reel_res {
             continuation = feed.continuation;
-            for item in feed.items {
-                candidates.push(item.to_video_summary());
-                rich.insert(item.id.clone(), item);
-            }
+            reels = feed.items;
         }
-        for item in seeded {
+        reels.extend(seeded);
+        // Reel sequences name no title or channel, which ranking and block rules
+        // need. Looked up after the lanes, on a budget of its own, so a slow
+        // lookup costs titles and never the reels themselves.
+        yt.fill_short_details(&mut reels).await;
+        for item in reels {
             candidates.push(item.to_video_summary());
             rich.entry(item.id.clone()).or_insert(item);
         }
@@ -581,7 +582,7 @@ async fn run_discovery_searches(
     let searches = queries.into_iter().map(|query| {
         let request = SearchVideosRequest {
             query,
-            duration: Some("short".to_string()),
+            content_type: Some("shorts".to_string()),
             ..SearchVideosRequest::default()
         };
         async move {
@@ -595,11 +596,20 @@ async fn run_discovery_searches(
     let mut returned = 0usize;
     let mut kept: Vec<VideoSummary> = Vec::new();
     for response in join_all(searches).await.into_iter().flatten() {
-        returned += response.items.len();
+        // A Shorts search answers with Shorts grids, not video results.
+        returned += response.shorts.len();
         kept.extend(
             response
-                .items
+                .shorts
                 .into_iter()
+                .map(|short| VideoSummary {
+                    id: short.id,
+                    title: short.title,
+                    thumbnail_url: short.thumbnail_url,
+                    view_count_text: short.view_count_text,
+                    is_short: true,
+                    ..VideoSummary::default()
+                })
                 .filter(is_short_candidate)
                 .take(SHORTS_PER_SEARCH),
         );
@@ -660,6 +670,7 @@ async fn gather_subscription_shorts(
                     view_count_text: short.view_count_text,
                     channel_avatar_url: None,
                     is_live: false,
+                    ..Default::default()
                 });
             }
         }
@@ -721,6 +732,7 @@ mod tests {
             view_count_text: None,
             channel_avatar_url: None,
             is_live: false,
+            ..Default::default()
         }
     }
 

@@ -1,6 +1,7 @@
 import { getString, type StringKey } from "./i18n/index";
-import { parseToTimestamp } from "./publishedDate";
+import { backendPublishedTimestamp, parseToTimestamp } from "./publishedDate";
 import type { VideoSummary } from "../types/video";
+import { profileStorage } from "./storage/profileStorage";
 
 // Mirrors Flow-Android's PlaylistSorting.
 
@@ -14,6 +15,8 @@ export const PLAYLIST_SORT_ORDERS = [
   "most_popular",
   "date_published_newest",
   "date_published_oldest",
+  "longest",
+  "shortest",
 ] as const;
 
 export type PlaylistSortOrder = (typeof PLAYLIST_SORT_ORDERS)[number];
@@ -39,7 +42,7 @@ export const resolvePlaylistSortOrder = (
 
 const loadPlaylistSortOrders = (): Record<string, string> => {
   try {
-    const parsed: unknown = JSON.parse(localStorage.getItem(SORT_ORDERS_STORAGE_KEY) ?? "{}");
+    const parsed: unknown = JSON.parse(profileStorage.getItem(SORT_ORDERS_STORAGE_KEY) ?? "{}");
     return parsed && typeof parsed === "object" ? (parsed as Record<string, string>) : {};
   } catch {
     return {};
@@ -52,7 +55,7 @@ export const loadPlaylistSortOrder = (playlistId: string): string | null =>
 
 export const savePlaylistSortOrder = (playlistId: string, order: PlaylistSortOrder) => {
   try {
-    localStorage.setItem(
+    profileStorage.setItem(
       SORT_ORDERS_STORAGE_KEY,
       JSON.stringify({ ...loadPlaylistSortOrders(), [playlistId]: order }),
     );
@@ -78,6 +81,8 @@ export const parseViewCount = (text?: string | null): number => {
 };
 
 function effectivePlaylistUploadTimestamp(video: VideoSummary, now: number): number {
+  const fromBackend = backendPublishedTimestamp(video);
+  if (fromBackend !== null) return fromBackend;
   const parsed = video.publishedText ? parseToTimestamp(video.publishedText, now) : null;
   const stored = video.publishedAt ?? 0;
   if (stored <= 0) return parsed ?? 0;
@@ -100,6 +105,10 @@ function sortedByPublishDate(videos: VideoSummary[], descending: boolean, now: n
   keyed.sort((a, b) => (descending ? b[1] - a[1] : a[1] - b[1]));
   return keyed.map(([video]) => video);
 }
+
+// A live stream or a row saved without its length has no duration; it sorts last by length either way.
+const shortestKey = (video: VideoSummary): number =>
+  video.durationSeconds && video.durationSeconds > 0 ? video.durationSeconds : Number.MAX_SAFE_INTEGER;
 
 /**
  * `storedNewestFirst` says how the list is kept: Watch Later prepends new tracks, other
@@ -126,5 +135,9 @@ export function sortPlaylistVideos(
       return sortedByPublishDate(videos, true, now);
     case "date_published_oldest":
       return sortedByPublishDate(videos, false, now);
+    case "longest":
+      return [...videos].sort((a, b) => (b.durationSeconds ?? 0) - (a.durationSeconds ?? 0));
+    case "shortest":
+      return [...videos].sort((a, b) => shortestKey(a) - shortestKey(b));
   }
 }

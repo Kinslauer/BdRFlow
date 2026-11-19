@@ -12,9 +12,12 @@ use tokio::time::timeout;
 
 use super::cache;
 use super::card::Card;
-use crate::commands::youtube::{fetch_rss_channel_batch, populate_video_durations};
+use crate::api::innertube::extractors::channel::VIDEOS_TAB_PARAMS;
+use crate::api::innertube::renderers::lockup::related_to_video;
+use crate::commands::youtube::populate_video_durations;
 use crate::models::channel::ChannelItem;
 use crate::models::search::SearchVideosRequest;
+use crate::services::subscription_feed;
 use crate::services::youtube_service::YoutubeService;
 
 const SEARCH_TIMEOUT: Duration = Duration::from_secs(6);
@@ -26,19 +29,34 @@ const RELATED_MEMORY_TTL_MS: u64 = 45 * 60_000;
 const RELATED_TIMEOUT: Duration = Duration::from_secs(4);
 const RELATED_CONCURRENCY: usize = 3;
 const CHANNEL_TAB_TIMEOUT: Duration = Duration::from_secs(15);
-const VIDEOS_TAB: &str = "EgZ2aWRlb3PyBgQKAjoA";
 const DURATION_FILL_MAX: usize = 100;
+
+const DAY_MS: u64 = 86_400_000;
+
+/// The narrowest upload-date search filter that still covers videos up to `max_age_ms` old, so a
+/// short limit is filled with recent uploads instead of results Home would leave out.
+#[must_use]
+pub fn upload_filter(max_age_ms: Option<u64>) -> Option<&'static str> {
+    Some(match max_age_ms? {
+        age if age <= DAY_MS => "today",
+        age if age <= 7 * DAY_MS => "week",
+        age if age <= 31 * DAY_MS => "month",
+        _ => "year",
+    })
+}
 
 /// A search for `query` from its first page or a kept continuation; errors when the request failed.
 async fn search(
     yt: &YoutubeService,
     query: &str,
     token: Option<String>,
+    upload_date: Option<&'static str>,
     now_ms: u64,
 ) -> Result<(Vec<Card>, Option<String>), ()> {
     let request = SearchVideosRequest {
         query: query.to_string(),
         page_token: token,
+        upload_date: upload_date.map(str::to_string),
         ..SearchVideosRequest::default()
     };
     match timeout(SEARCH_TIMEOUT, yt.search_videos(request)).await {
@@ -71,6 +89,7 @@ pub struct SearchPages {
 struct SearchState {
     pages: VecDeque<(String, Page)>,
     next_page: Vec<(String, String)>,
+    upload_date: Option<&'static str>,
 }
 
 impl SearchPages {
@@ -104,7 +123,8 @@ impl SearchPages {
             self.remember(query, next);
             return Ok(cards);
         }
-        let Ok((cards, next)) = search(yt, query, token.clone(), now_ms).await else {
+        let upload_date = self.state.lock().unwrap().upload_date;
+        let Ok((cards, next)) = search(yt, query, token.clone(), upload_date, now_ms).await else {
             // The next page was spent on this request; keep it for another try.
             if token.is_some() {
                 self.remember(query, token);
@@ -195,9 +215,24 @@ impl SearchPages {
             .and_then(|(key, _)| key.split('\u{0}').next().map(str::to_string))
     }
 
-    /// A refresh starts the searches over.
+    /// A refresh starts the searches over, with the same upload-date filter.
     pub fn reset(&self) {
-        *self.state.lock().unwrap() = SearchState::default();
+        let mut state = self.state.lock().unwrap();
+        *state = SearchState {
+            upload_date: state.upload_date,
+            ..SearchState::default()
+        };
+    }
+
+    /// Searches from now on ask for uploads this recent; pages kept under another filter are dropped.
+    pub fn set_upload_date(&self, upload_date: Option<&'static str>) {
+        let mut state = self.state.lock().unwrap();
+        if state.upload_date != upload_date {
+            *state = SearchState {
+                upload_date,
+                ..SearchState::default()
+            };
+        }
     }
 }
 
@@ -241,31 +276,22 @@ impl RelatedLists {
         let Ok(_permit) = self.permits.acquire().await else {
             return Vec::new();
         };
-        let fetched = match timeout(RELATED_TIMEOUT, yt.get_related_videos(seed_id)).await {
-            Ok(Ok(items)) => items
+        let fetched = match timeout(RELATED_TIMEOUT, yt.get_feed_related_videos(seed_id)).await {
+            Ok(Ok(page)) => page
+                .items
                 .into_iter()
                 .filter(|item| item.item_type == "video" && !item.is_mix)
-                .map(|item| {
-                    let id = item.video_id.clone().unwrap_or_else(|| item.id.clone());
-                    Card::from_summary(
-                        crate::models::video::VideoSummary {
-                            id,
-                            title: item.title,
-                            channel_name: item.channel_name,
-                            channel_id: item.channel_id,
-                            thumbnail_url: item.thumbnail_url,
-                            duration_seconds: item.duration_seconds,
-                            published_text: item.published_text,
-                            view_count_text: item.view_count_text,
-                            channel_avatar_url: None,
-                            is_live: false,
-                        },
-                        now_ms,
-                    )
-                })
+                .map(|item| Card::from_summary(related_to_video(item), now_ms))
                 .collect(),
             _ => Vec::new(),
         };
+        let shorts: Vec<String> = fetched
+            .iter()
+            .filter(|card: &&Card| card.video.is_short)
+            .map(|card| card.id().to_string())
+            .collect();
+        let now = i64::try_from(now_ms).unwrap_or(i64::MAX);
+        let _ = crate::db::known_shorts::remember(pool, &shorts, now).await;
         // A timeout returns nothing; caching that would blank the seed's lane for the whole TTL.
         if !fetched.is_empty() {
             self.memory
@@ -290,7 +316,7 @@ pub async fn channel_uploads(
 ) -> Option<Vec<Card>> {
     let response = timeout(
         CHANNEL_TAB_TIMEOUT,
-        yt.get_channel_tab(channel_id, Some(VIDEOS_TAB.to_string()), None, None),
+        yt.get_channel_tab(channel_id, Some(VIDEOS_TAB_PARAMS.to_string()), None, None),
     )
     .await
     .ok()?
@@ -319,12 +345,9 @@ pub async fn refresh_subscription_store(
     channel_ids: &[String],
     now_ms: u64,
 ) {
-    let mut videos = Vec::new();
-    for (_, channel_videos) in
-        fetch_rss_channel_batch(crate::api::http::shared_client(), channel_ids).await
-    {
-        videos.extend(channel_videos);
-    }
+    let videos = subscription_feed::fetch_channels(yt, channel_ids)
+        .await
+        .videos;
     store_rss_uploads(yt, pool, videos, now_ms).await;
 }
 
@@ -380,6 +403,25 @@ pub fn rotating_window<T: Clone>(items: &[T], start: usize, count: usize) -> Vec
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_video_age_limit_picks_the_narrowest_search_filter_that_covers_it() {
+        let filters: Vec<Option<&str>> = [None, Some(1), Some(3), Some(7), Some(30), Some(180)]
+            .into_iter()
+            .map(|days| upload_filter(days.map(|days| days * DAY_MS)))
+            .collect();
+        assert_eq!(
+            filters,
+            [
+                None,
+                Some("today"),
+                Some("week"),
+                Some("week"),
+                Some("month"),
+                Some("year")
+            ]
+        );
+    }
 
     #[test]
     fn the_subscription_window_rotates_and_wraps() {
