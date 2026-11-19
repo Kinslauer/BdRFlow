@@ -58,10 +58,7 @@ pub fn playback_window(app: &AppHandle) -> String {
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .clone();
-    target_window(claimed.as_deref(), |label| {
-        app.get_window(label).is_some()
-    })
-    .to_owned()
+    target_window(claimed.as_deref(), |label| app.get_window(label).is_some()).to_owned()
 }
 
 /// Sends a command to the window that last started playing.
