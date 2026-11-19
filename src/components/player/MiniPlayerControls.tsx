@@ -1,7 +1,20 @@
 import { getString } from "../../lib/i18n/index";
 import React, { useEffect, useRef } from "react";
-import { FastForward, Pause, Play, Rewind, SkipBack, SkipForward } from "lucide-react";
+import {
+  FastForward,
+  Pause,
+  Play,
+  Rewind,
+  SkipBack,
+  SkipForward,
+  Volume1,
+  Volume2,
+  VolumeX,
+} from "lucide-react";
 import { usePlayerStore } from "../../store/usePlayerStore";
+import { Slider } from "../ui/Slider";
+import { useWheelVolume } from "../../lib/useWheelVolume";
+import { useVolumeLevel } from "../../lib/audio/volumeBoost";
 import {
   PROGRESS_EVENTS,
   cssPercent,
@@ -27,6 +40,8 @@ export interface MiniPlayerControlsProps {
   seekTo: (time: number) => void;
   showSkipControls: boolean;
   showNextPrevControls: boolean;
+  muted: boolean;
+  setMuted: React.Dispatch<React.SetStateAction<boolean>>;
 }
 
 export const MiniPlayerControls: React.FC<MiniPlayerControlsProps> = ({
@@ -39,9 +54,26 @@ export const MiniPlayerControls: React.FC<MiniPlayerControlsProps> = ({
   seekTo,
   showSkipControls,
   showNextPrevControls,
+  muted,
+  setMuted,
 }) => {
   const playNext = usePlayerStore((s) => s.playNext);
   const playPrevious = usePlayerStore((s) => s.playPrevious);
+  const volume = usePlayerStore((s) => s.volume);
+
+  // Same volume model as the full player's control, so both stay in step.
+  const { level: volumeLevel, maxLevel, setLevel: setVolumeLevel } = useVolumeLevel();
+  const changeVolume = (value: number) => {
+    setVolumeLevel(value);
+    setMuted(value === 0);
+  };
+  const volumeWheelRef = useWheelVolume({
+    volume: volumeLevel,
+    max: maxLevel,
+    muted,
+    onVolumeChange: changeVolume,
+    onUnmute: () => setMuted(false),
+  });
 
   const trackRef = useRef<HTMLDivElement>(null);
   const fillRef = useRef<HTMLDivElement>(null);
@@ -96,7 +128,7 @@ export const MiniPlayerControls: React.FC<MiniPlayerControlsProps> = ({
   };
 
   const sideBtn =
-    "grid h-8 w-8 place-items-center rounded-full text-chrome-white/90 transition-colors hover:bg-chrome-white/15";
+    "grid h-8 w-8 shrink-0 place-items-center rounded-full text-chrome-white/90 transition-colors hover:bg-chrome-white/15";
 
   return (
     <div
@@ -133,49 +165,82 @@ export const MiniPlayerControls: React.FC<MiniPlayerControlsProps> = ({
         </div>
 
         {/* Transport row */}
-        <div className="mt-0.5 flex items-center justify-center gap-2">
-          {showNextPrevControls && (
-            <button type="button" title={getString('previous')} onClick={playPrevious} className={sideBtn}>
-              <SkipBack size={16} fill="currentColor" />
-            </button>
-          )}
-          {showSkipControls && (
-            <button
-              type="button"
-              title={getString('player_mini_back_seconds', seekIntervalSeconds)}
-              onClick={() => skip(-seekIntervalSeconds)}
-              className={sideBtn}
-            >
-              <Rewind size={17} />
-            </button>
-          )}
-          <button
-            type="button"
-            title={getString(isPlaying ? 'pause' : 'play')}
-            onClick={togglePlay}
-            className="grid h-11 w-11 place-items-center rounded-full bg-chrome-white/10 text-chrome-white transition-transform hover:bg-chrome-white/20 active:scale-95"
+        <div className="mt-0.5 grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-2">
+          {/* Volume takes the left column so the transport stays centred and never overlaps it. */}
+          <div
+            ref={volumeWheelRef}
+            className="group/mpvol flex min-w-0 items-center justify-self-start rounded-full hover:bg-chrome-black/30 hover:pr-2"
           >
-            {isPlaying ? (
-              <Pause size={22} fill="currentColor" />
-            ) : (
-              <Play size={22} fill="currentColor" className="ml-0.5" />
-            )}
-          </button>
-          {showSkipControls && (
             <button
               type="button"
-              title={getString('player_mini_forward_seconds', seekIntervalSeconds)}
-              onClick={() => skip(seekIntervalSeconds)}
+              title={getString('music_mute')}
+              aria-label={getString('music_mute')}
+              onClick={() => setMuted((value) => !value)}
               className={sideBtn}
             >
-              <FastForward size={17} />
+              {muted || volume === 0 ? (
+                <VolumeX size={16} />
+              ) : volume < 0.55 ? (
+                <Volume1 size={16} />
+              ) : (
+                <Volume2 size={16} />
+              )}
             </button>
-          )}
-          {showNextPrevControls && (
-            <button type="button" title={getString('next')} onClick={() => playNext()} className={sideBtn}>
-              <SkipForward size={16} fill="currentColor" />
+            <div className="w-0 min-w-0 overflow-hidden opacity-0 transition-all group-focus-within/mpvol:w-16 group-focus-within/mpvol:opacity-100 group-hover/mpvol:w-16 group-hover/mpvol:opacity-100">
+              <Slider
+                aria-label={getString('music_volume')}
+                min={0}
+                max={maxLevel}
+                step={0.01}
+                value={muted ? 0 : volumeLevel}
+                onChange={changeVolume}
+              />
+            </div>
+          </div>
+          <div className="flex items-center justify-center gap-2">
+            {showNextPrevControls && (
+              <button type="button" title={getString('previous')} onClick={playPrevious} className={sideBtn}>
+                <SkipBack size={16} fill="currentColor" />
+              </button>
+            )}
+            {showSkipControls && (
+              <button
+                type="button"
+                title={getString('player_mini_back_seconds', seekIntervalSeconds)}
+                onClick={() => skip(-seekIntervalSeconds)}
+                className={sideBtn}
+              >
+                <Rewind size={17} />
+              </button>
+            )}
+            <button
+              type="button"
+              title={getString(isPlaying ? 'pause' : 'play')}
+              onClick={togglePlay}
+              className="grid h-11 w-11 place-items-center rounded-full bg-chrome-white/10 text-chrome-white transition-transform hover:bg-chrome-white/20 active:scale-95"
+            >
+              {isPlaying ? (
+                <Pause size={22} fill="currentColor" />
+              ) : (
+                <Play size={22} fill="currentColor" className="ml-0.5" />
+              )}
             </button>
-          )}
+            {showSkipControls && (
+              <button
+                type="button"
+                title={getString('player_mini_forward_seconds', seekIntervalSeconds)}
+                onClick={() => skip(seekIntervalSeconds)}
+                className={sideBtn}
+              >
+                <FastForward size={17} />
+              </button>
+            )}
+            {showNextPrevControls && (
+              <button type="button" title={getString('next')} onClick={() => playNext()} className={sideBtn}>
+                <SkipForward size={16} fill="currentColor" />
+              </button>
+            )}
+          </div>
         </div>
       </div>
     </div>
