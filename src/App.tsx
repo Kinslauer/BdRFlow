@@ -50,6 +50,7 @@ import { Watch } from "./pages/Watch";
 import { ShortsFeed } from "./components/shorts/ShortsFeed";
 import Onboarding from "./pages/Onboarding";
 import FlowNeuroPersona from "./pages/FlowNeuroPersona";
+import Browser from "./pages/Browser";
 import { LayoutGroup } from "framer-motion";
 import { ToastHost } from "./components/ui/ToastHost";
 import { GlobalMusicAudio } from "./components/music/GlobalMusicAudio";
@@ -253,6 +254,7 @@ function App() {
           <Route path="watch/:videoId" element={
             <Watch />
           } />
+          <Route path="browse" element={<Browser />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Route>
       </Routes>

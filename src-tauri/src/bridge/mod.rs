@@ -136,7 +136,7 @@ async fn handle_connection(mut socket: TcpStream, app: &AppHandle) -> std::io::R
 /// Focus the window and emit the equivalent `flow://` URL so the frontend's
 /// single deep-link handler routes it (play or open the download dialog).
 fn dispatch(app: &AppHandle, url: String) {
-    if let Some(window) = app.get_webview_window("main") {
+    if let Some(window) = app.get_window("main") {
         let _ = window.unminimize();
         let _ = window.show();
         let _ = window.set_focus();

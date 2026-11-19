@@ -1472,5 +1472,14 @@
   "tabs_close_others": "Close other tabs",
   "tabs_duplicate": "Duplicate tab",
   "tabs_reopen_closed": "Reopen closed tab",
-  "tabs_open_in_new_tab": "Open in new tab"
+  "tabs_open_in_new_tab": "Open in new tab",
+  "tabs_new_browser_tab": "New web tab",
+  "browser_address": "Web address",
+  "browser_address_placeholder": "Search the web or type an address",
+  "browser_reload": "Reload",
+  "browser_stop": "Stop loading",
+  "browser_open_external": "Open in your browser",
+  "browser_start_title": "Browse the web",
+  "browser_start_body": "Type an address or a search above. Pages open right here, in this tab.",
+  "browser_error_title": "This page couldn't be opened"
 }

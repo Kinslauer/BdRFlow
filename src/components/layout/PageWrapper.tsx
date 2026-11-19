@@ -21,6 +21,7 @@ export function PageWrapper() {
     location.pathname.startsWith('/music/album/') ||
     location.pathname.startsWith('/music/playlist/');
   const isHistoryPage = location.pathname === '/history';
+  const isBrowserPage = location.pathname === '/browse';
 
   const mainRef = useRef<HTMLElement>(null);
   useEffect(() => {
@@ -38,6 +39,7 @@ export function PageWrapper() {
             isPlaylistDetailsPage
               || isMusicCollectionPage
               || isHistoryPage
+              || isBrowserPage
               ? "flex min-h-0 flex-1 flex-col overflow-hidden"
               : "flex-1 overflow-y-auto"
           }

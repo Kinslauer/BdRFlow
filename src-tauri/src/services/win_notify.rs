@@ -121,7 +121,7 @@ pub fn show(app: &AppHandle, card: &ToastCard<'_>) {
 fn activate_video(app: &AppHandle, video_id: &str) {
     use tauri::Emitter;
 
-    if let Some(window) = app.get_webview_window("main") {
+    if let Some(window) = app.get_window("main") {
         let _ = window.unminimize();
         let _ = window.show();
         let _ = window.set_focus();
