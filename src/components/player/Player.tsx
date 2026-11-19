@@ -2894,6 +2894,8 @@ export const Player: React.FC<PlayerProps> = ({
           seekTo={seekTo}
           showSkipControls={miniPlayerShowSkipControls}
           showNextPrevControls={miniPlayerShowNextPrevControls}
+          muted={muted}
+          setMuted={setMuted}
         />
       ) : (
       <FlowPlayerControls
