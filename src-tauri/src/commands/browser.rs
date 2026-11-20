@@ -49,6 +49,58 @@ struct BrowserStatePayload {
 #[derive(Debug, Clone, Serialize)]
 struct BrowserOpenTabPayload {
     url: String,
+    /// Opened by a middle-click or Ctrl-click: the new tab opens behind the
+    /// current one, as in a browser.
+    background: bool,
+}
+
+/// Appended to a link's fragment by [`BACKGROUND_LINK_SCRIPT`] so the
+/// new-window handler can tell a background-tab click from a popup. It is
+/// stripped again before the page is opened.
+const BACKGROUND_MARKER: &str = "~flow-background-tab";
+
+/// Runs in every browser page. A middle-click or Ctrl/Cmd-click on a web link
+/// becomes a `window.open` of the link with [`BACKGROUND_MARKER`] on its
+/// fragment, so the new tab opens behind the current one instead of in front.
+/// The page has no IPC, so the marker is the only way to carry that intent.
+const BACKGROUND_LINK_SCRIPT: &str = r#"(() => {
+  const MARKER = "~flow-background-tab";
+  const linkFor = (event) => {
+    const link = event.target instanceof Element ? event.target.closest("a[href]") : null;
+    if (!link || link.hasAttribute("download")) return null;
+    const url = new URL(link.href, document.baseURI);
+    return url.protocol === "http:" || url.protocol === "https:" ? url : null;
+  };
+  const openBehind = (event) => {
+    const url = linkFor(event);
+    if (!url) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    url.hash = url.hash.slice(1) + MARKER;
+    window.open(url.href, "_blank");
+  };
+  addEventListener("auxclick", (event) => {
+    if (event.button === 1) openBehind(event);
+  }, true);
+  addEventListener("click", (event) => {
+    if (event.button === 0 && (event.ctrlKey || event.metaKey) && !event.shiftKey && !event.altKey) openBehind(event);
+  }, true);
+})();"#;
+
+/// The page a new-window request asks for, and whether it came from a
+/// background-tab click (see [`BACKGROUND_MARKER`]).
+fn new_tab_target(mut url: Url) -> (Url, bool) {
+    let stripped = url
+        .fragment()
+        .and_then(|fragment| fragment.strip_suffix(BACKGROUND_MARKER))
+        .map(str::to_owned);
+    match stripped {
+        Some(rest) => {
+            url.set_fragment((!rest.is_empty()).then_some(rest.as_str()));
+            (url, true)
+        }
+        None => (url, false),
+    }
 }
 
 fn validation(message: impl Into<String>) -> ErrorResponse {
@@ -279,13 +331,16 @@ fn build_webview<R: Runtime>(
                 emit_state(&title_app, webview.label(), "title", &url, Some(title));
             }
         })
+        .initialization_script(BACKGROUND_LINK_SCRIPT)
         .on_new_window(move |url, _features| {
             if is_allowed_url(&url) && url.scheme() != "about" {
+                let (url, background) = new_tab_target(url);
                 let _ = popup_app.emit_to(
                     MAIN_WINDOW_LABEL,
                     OPEN_TAB_EVENT,
                     BrowserOpenTabPayload {
                         url: url.to_string(),
+                        background,
                     },
                 );
             }
@@ -477,6 +532,30 @@ mod tests {
         assert!(!is_allowed_url(&Url::parse("about:config").unwrap()));
         assert!(!is_allowed_url(&Url::parse("file:///tmp/x").unwrap()));
         assert!(!is_allowed_url(&Url::parse("mailto:a@b.c").unwrap()));
+    }
+
+    #[test]
+    fn background_marker_is_stripped_from_new_tabs() {
+        let open = |raw: &str| {
+            let (url, background) = new_tab_target(Url::parse(raw).unwrap());
+            (url.to_string(), background)
+        };
+        assert_eq!(
+            open("https://example.com/a#~flow-background-tab"),
+            ("https://example.com/a".to_string(), true)
+        );
+        assert_eq!(
+            open("https://example.com/a#part~flow-background-tab"),
+            ("https://example.com/a#part".to_string(), true)
+        );
+        assert_eq!(
+            open("https://example.com/a#part"),
+            ("https://example.com/a#part".to_string(), false)
+        );
+        assert_eq!(
+            open("https://example.com/"),
+            ("https://example.com/".to_string(), false)
+        );
     }
 
     #[test]

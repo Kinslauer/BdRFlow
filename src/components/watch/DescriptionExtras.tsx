@@ -3,6 +3,7 @@ import { useProxiedImageUrl } from "../../lib/useProxiedImageUrl";
 import { usePlayMusicCard } from "../../lib/usePlayMusicCard";
 import { useMusicEnabled } from "../../lib/useMusicContent";
 import { useRichTargetHandler } from "../../lib/useRichTargetHandler";
+import { linkBackgroundTabProps, openedLinkInBackgroundTab } from "../../lib/openLinkInTab";
 import { getString } from "../../lib/i18n/index";
 import type { DescriptionExtras as Extras } from "../../types/video";
 import { joinIsolated } from "../../lib/direction";
@@ -71,8 +72,10 @@ export function DescriptionExtras({ extras }: { extras: Extras }) {
             <button dir="auto"
               key={link.url}
               type="button"
+              {...linkBackgroundTabProps(link.url)}
               onClick={(event) => {
                 event.stopPropagation();
+                if (openedLinkInBackgroundTab(event, link.url)) return;
                 openTarget({ kind: "url", url: link.url });
               }}
               className="rounded-full border border-chrome-neutral-800 px-3 py-1 text-xs font-medium text-chrome-neutral-200 transition-colors hover:bg-surface-container-high"

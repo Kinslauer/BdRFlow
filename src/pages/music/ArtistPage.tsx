@@ -21,6 +21,7 @@ import { useProxiedImageUrl } from '../../lib/useProxiedImageUrl';
 import type { MusicWatchTarget, SongItem } from '../../types/music';
 import { artistMixQueue } from '../../lib/artistMix';
 import { openExternal } from '../../lib/openExternal';
+import { linkBackgroundTabProps, openedLinkInBackgroundTab } from '../../lib/openLinkInTab';
 import { shuffled } from '../../lib/musicRecall';
 import { shareLink } from '../../lib/clipboard';
 import { youtubeMusicArtistUrl } from '../../lib/youtubeUrl';
@@ -530,7 +531,15 @@ export default function ArtistPage() {
             {aboutLinks.length > 0 ? (
               <div className="-mt-20 mb-24 flex flex-wrap gap-2">
                 {aboutLinks.map((link) => (
-                  <Button key={link.url} variant="tonal" size="sm" onClick={() => void openExternal(link.url)}>
+                  <Button
+                    key={link.url}
+                    variant="tonal"
+                    size="sm"
+                    {...linkBackgroundTabProps(link.url)}
+                    onClick={(event) => {
+                      if (!openedLinkInBackgroundTab(event, link.url)) void openExternal(link.url);
+                    }}
+                  >
                     <ExternalLink className="h-4 w-4" />
                     {link.label}
                   </Button>
