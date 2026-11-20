@@ -7,3 +7,7 @@
 
 # Shell scripts must stay LF or bash chokes on CR line endings in CI.
 *.sh text eol=lf
+
+# Windows batch files need CRLF line endings.
+*.bat text eol=crlf
+*.cmd text eol=crlf
