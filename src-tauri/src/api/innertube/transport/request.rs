@@ -75,6 +75,14 @@ impl RequestSpec<'_> {
         if let Some(visitor) = visitor.filter(|value| !value.is_empty()) {
             headers.push(("X-Goog-Visitor-Id", visitor.to_string()));
         }
+        // Only a `player` request made inside a signed-in walk carries the account.
+        if self.endpoint == "player"
+            && let Some(account) =
+                crate::api::innertube::account::request_headers(self.client, origin)
+        {
+            headers.retain(|(name, _)| *name != "Cookie");
+            headers.extend(account);
+        }
         headers
     }
 

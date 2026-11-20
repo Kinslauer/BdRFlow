@@ -497,6 +497,12 @@ pub async fn browser_stop<R: Runtime>(app: AppHandle<R>, id: String) -> Result<(
     Ok(())
 }
 
+/// Whether the user is signed in to YouTube in a web tab (Settings > Network).
+#[tauri::command]
+pub async fn youtube_account_status() -> Result<bool, ErrorResponse> {
+    Ok(crate::api::innertube::account::sign_in_status().await)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
