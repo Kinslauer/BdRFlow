@@ -61,3 +61,8 @@ export function reloadBrowserView(id: string) {
 export function stopBrowserView(id: string) {
   return invokeBackend<void>("browser_stop", { id });
 }
+
+/** Whether the user is signed in to YouTube in a web tab (the cookie store web tabs share). */
+export function youtubeAccountStatus(): Promise<boolean> {
+  return invokeBackend<boolean>("youtube_account_status");
+}

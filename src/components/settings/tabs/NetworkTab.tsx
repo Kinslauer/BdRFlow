@@ -9,6 +9,9 @@ import { useBoolPref, usePreference, useNumberPref } from '../../../lib/usePrefe
 import { getString } from '../../../lib/i18n/index';
 import { SETTINGS } from '../../../lib/settings/schema';
 import { isSettingDisabledUntilWired } from '../../../lib/settings/values';
+import { Button } from '../../ui/Button';
+import { useYouTubeAccount } from '../../../lib/useYouTubeAccount';
+import { IS_MAIN_WINDOW } from '../../../lib/appWindow';
 
 export function NetworkTab() {
   const [bufferProfile, setBufferProfile] = usePreference(SETTINGS.BUFFER_PROFILE, 'STABLE');
@@ -18,6 +21,8 @@ export function NetworkTab() {
   const [rebufferBuffer, setRebufferBuffer] = useNumberPref(SETTINGS.BUFFER_FOR_PLAYBACK_AFTER_REBUFFER_MS, 5000);
   const [remoteSignatures, setRemoteSignatures] = useBoolPref(SETTINGS.REMOTE_SIGNATURE_FALLBACK, true);
   const [preferIpv4, setPreferIpv4] = useBoolPref(SETTINGS.PREFER_IPV4, false);
+  const [useAccount, setUseAccount] = useBoolPref(SETTINGS.YOUTUBE_ACCOUNT_FALLBACK, true);
+  const account = useYouTubeAccount();
   const [proxyEnabled, setProxyEnabled] = useBoolPref(SETTINGS.PROXY_ENABLED, false);
   const [proxyType, setProxyType] = usePreference(SETTINGS.PROXY_TYPE, 'http');
   const [proxyHost, setProxyHost] = usePreference(SETTINGS.PROXY_HOST, '');
@@ -75,6 +80,25 @@ export function NetworkTab() {
         </SettingItem>
         <SettingItem title={getString('settings_prefer_ipv4')} description={getString('settings_prefer_ipv4_desc')}>
           <ToggleSwitch checked={preferIpv4} onChange={setPreferIpv4} />
+        </SettingItem>
+        <SettingItem title={getString('settings_youtube_account')} description={getString('settings_youtube_account_desc')}>
+          <div className="flex items-center gap-3">
+            {account.signedIn !== null && (
+              <span className="text-xs text-chrome-zinc-400">
+                {getString(account.signedIn ? 'settings_youtube_account_signed_in' : 'settings_youtube_account_signed_out')}
+              </span>
+            )}
+            {account.signedIn === false && IS_MAIN_WINDOW ? (
+              <Button variant="secondary" size="sm" onClick={account.signIn}>
+                {getString('settings_youtube_account_sign_in')}
+              </Button>
+            ) : (
+              <Button variant="secondary" size="sm" onClick={account.check} disabled={account.checking}>
+                {getString('settings_youtube_account_check')}
+              </Button>
+            )}
+            <ToggleSwitch checked={useAccount} onChange={setUseAccount} />
+          </div>
         </SettingItem>
       </SettingsGroup>
 

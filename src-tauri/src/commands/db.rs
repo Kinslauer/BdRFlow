@@ -228,7 +228,7 @@ pub async fn set_setting(
 }
 
 /// Settings the backend acts on itself, applied at startup and whenever saved.
-pub(crate) const BACKEND_SETTINGS: [&str; 11] = [
+pub(crate) const BACKEND_SETTINGS: [&str; 12] = [
     remote_decoder::SETTING_KEY,
     audio_preference::STABLE_VOLUME_SETTING,
     locale::CONTENT_LANGUAGE_SETTING,
@@ -240,6 +240,7 @@ pub(crate) const BACKEND_SETTINGS: [&str; 11] = [
     app_proxy::USERNAME_SETTING,
     app_proxy::PASSWORD_SETTING,
     ip_family::PREFER_IPV4_SETTING,
+    crate::api::innertube::account::SETTING_KEY,
 ];
 
 pub(crate) fn apply_backend_setting(key: &str, value: Option<&str>) {
@@ -250,6 +251,11 @@ pub(crate) fn apply_backend_setting(key: &str, value: Option<&str>) {
     if key == remote_decoder::SETTING_KEY {
         // On unless turned off, as on Flow for Android: it is the only way past a walled visitor.
         remote_decoder::set_enabled(value.is_none_or(|value| value.eq_ignore_ascii_case("true")));
+    } else if key == crate::api::innertube::account::SETTING_KEY {
+        // On unless turned off: it does nothing until the user signs in to YouTube.
+        crate::api::innertube::account::set_enabled(
+            value.is_none_or(|value| value.eq_ignore_ascii_case("true")),
+        );
     } else if key == audio_preference::STABLE_VOLUME_SETTING {
         audio_preference::set_stable_volume(enabled);
     } else if key == locale::CONTENT_LANGUAGE_SETTING {

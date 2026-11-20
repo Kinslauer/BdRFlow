@@ -1,4 +1,5 @@
 use crate::api::innertube::InnertubeClient;
+use crate::api::innertube::account;
 use crate::api::innertube::core::botguard::generate_po_token;
 use crate::api::innertube::core::clients;
 use crate::api::innertube::core::gate_tracker::{self, is_gated};
@@ -81,6 +82,12 @@ const PLAYER_CLIENT_LADDER: &[&clients::YouTubeClient] = &[
     &clients::ANDROID_VR_1_43_32,
     &clients::ANDROID,
 ];
+
+/// Asked as the signed-in user once the anonymous ladder ends on a bot wall. TV
+/// first: it needs no PO token, so it doesn't depend on BotGuard binding a token
+/// to the account. The web clients follow with their SABR sessions.
+const SIGNED_IN_CLIENT_LADDER: &[&clients::YouTubeClient] =
+    &[&clients::TV_TIZEN, &clients::WEB, &clients::MWEB];
 
 /// The order to ask `ladder`'s clients in: demoted clients last. With VISIONOS demoted the
 /// visitor is walled, and the web clients' SABR sessions stop at the same minute, so `TV_TIZEN`,
@@ -1488,7 +1495,7 @@ impl InnertubeClient {
                     .await;
                 let attempt = match attempt {
                     Some(direct) => Some(self.upgrade_to_sabr(video_id, direct).await),
-                    None => None,
+                    None => self.try_signed_in_ladder(video_id, &mut restriction).await,
                 };
                 if let Some(attempt) = attempt.as_ref() {
                     store_player_attempt(video_id, attempt);
@@ -1500,6 +1507,44 @@ impl InnertubeClient {
             *deferred_restriction = Some(report.to_error());
         }
         outcome.0.clone()
+    }
+
+    /// When every anonymous client ended on a bot wall, the clients YouTube serves
+    /// to a signed-in user are asked once more as the user, if they signed in to
+    /// YouTube in a web tab. Anything they refuse for a reason other than the wall
+    /// replaces the wall as the reason shown.
+    async fn try_signed_in_ladder(
+        &self,
+        video_id: &str,
+        restriction: &mut Option<LadderReport>,
+    ) -> Option<PlayerAttempt> {
+        let walled = restriction
+            .as_ref()
+            .is_some_and(|report| is_bot_wall(&report.refusal.playability));
+        if !walled {
+            return None;
+        }
+        let session = account::current_session().await?;
+        info!(video_id = %video_id, "Bot wall on every client; asking again signed in");
+        let mut signed_restriction = None;
+        let attempt = account::signed_in(
+            session,
+            self.try_player_ladder(
+                video_id,
+                SIGNED_IN_CLIENT_LADDER,
+                None,
+                &mut signed_restriction,
+            ),
+        )
+        .await;
+        if attempt.is_some() {
+            info!(video_id = %video_id, "Signed-in player request got past the bot wall");
+        } else if let Some(report) = signed_restriction
+            && !is_bot_wall(&report.refusal.playability)
+        {
+            *restriction = Some(report);
+        }
+        attempt
     }
 
     /// googlevideo walls the visitor, not the client: once it refused VISIONOS links, a fresh
