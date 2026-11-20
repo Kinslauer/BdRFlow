@@ -3,6 +3,7 @@ import { Calendar, Eye, Globe, Link2, Loader2, PlaySquare, Users, X } from "luci
 import { LinkedText } from "../watch/LinkedText";
 import { getString } from "../../lib/i18n/index";
 import { openExternal } from "../../lib/openExternal";
+import { linkBackgroundTabProps, openedLinkInBackgroundTab } from "../../lib/openLinkInTab";
 import { useChannelAbout } from "../../lib/useChannelPage";
 import { useProxiedImageUrl } from "../../lib/useProxiedImageUrl";
 import type { ChannelDetails, ChannelLink } from "../../types/video";
@@ -18,7 +19,10 @@ function LinkRow({ link }: { link: ChannelLink }) {
   return (
     <button
       type="button"
-      onClick={() => void openExternal(link.url)}
+      {...linkBackgroundTabProps(link.url)}
+      onClick={(event) => {
+        if (!openedLinkInBackgroundTab(event, link.url)) void openExternal(link.url);
+      }}
       className="flex w-full items-center gap-3 rounded-lg px-2 py-2 text-start transition-colors hover:bg-surface-container-high"
     >
       {icon ? (

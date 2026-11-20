@@ -118,7 +118,7 @@ export function useBrowserTabsController() {
     track(listen<BrowserStatePayload>(BROWSER_STATE_EVENT, (e) => handleBrowserState(e.payload)));
     track(
       listen<BrowserOpenTabPayload>(BROWSER_OPEN_TAB_EVENT, (e) => {
-        if (isWebUrl(e.payload.url)) openWebTab(e.payload.url);
+        if (isWebUrl(e.payload.url)) openWebTab(e.payload.url, !e.payload.background);
       }),
     );
 

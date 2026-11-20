@@ -28,6 +28,8 @@ export interface BrowserStatePayload {
 
 export interface BrowserOpenTabPayload {
   url: string;
+  /** A middle-click or Ctrl-click in the page: open the tab behind the current one. */
+  background?: boolean;
 }
 
 /** Show a tab's page at `bounds`; creates it on first use, and navigates when `url` differs. */
