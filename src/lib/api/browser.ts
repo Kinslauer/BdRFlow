@@ -32,26 +32,48 @@ export interface BrowserOpenTabPayload {
   background?: boolean;
 }
 
+/*
+  The backend runs async commands concurrently, so two calls sent back to back
+  can finish in either order. A "show" still in flight (opening a tab's page
+  for the first time takes a while) could land after the "hide" sent when the
+  user switched tabs, leaving the page drawn over the rest of the app. Calls
+  that change whether or where a page is shown therefore run one at a time, in
+  the order they were made.
+*/
+let queue: Promise<unknown> = Promise.resolve();
+
+/** Runs `call` after every earlier queued call has finished, failed or not. */
+export function inOrder<T>(call: () => Promise<T>): Promise<T> {
+  const result = queue.then(call);
+  queue = result.catch(() => {});
+  return result;
+}
+
 /** Show a tab's page at `bounds`; creates it on first use, and navigates when `url` differs. */
 export function showBrowserView(id: string, bounds: BrowserBounds, url?: string | null) {
-  return invokeBackend<void>("browser_show", { id, bounds, url: url ?? null });
+  return inOrder(() => invokeBackend<void>("browser_show", { id, bounds, url: url ?? null }));
 }
 
 export function setBrowserViewBounds(id: string, bounds: BrowserBounds) {
-  return invokeBackend<void>("browser_set_bounds", { id, bounds });
+  return inOrder(() => invokeBackend<void>("browser_set_bounds", { id, bounds }));
 }
 
 export function hideBrowserView(id: string) {
-  return invokeBackend<void>("browser_hide", { id });
+  return inOrder(() => invokeBackend<void>("browser_hide", { id }));
+}
+
+/** Hide every tab's page: the browser page is gone, so none should be on screen. */
+export function hideAllBrowserViews() {
+  return inOrder(() => invokeBackend<void>("browser_hide_all"));
 }
 
 export function closeBrowserView(id: string) {
-  return invokeBackend<void>("browser_close", { id });
+  return inOrder(() => invokeBackend<void>("browser_close", { id }));
 }
 
 /** Close every browser view whose tab is not in `ids`. */
 export function retainBrowserViews(ids: string[]) {
-  return invokeBackend<void>("browser_retain", { ids });
+  return inOrder(() => invokeBackend<void>("browser_retain", { ids }));
 }
 
 export function reloadBrowserView(id: string) {

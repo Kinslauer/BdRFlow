@@ -446,6 +446,18 @@ pub async fn browser_hide<R: Runtime>(app: AppHandle<R>, id: String) -> Result<(
     Ok(())
 }
 
+/// Hides every browser tab's page. Sent when the browser page itself goes away,
+/// so a page can't be left on top of the rest of the app.
+#[tauri::command]
+pub async fn browser_hide_all<R: Runtime>(app: AppHandle<R>) -> Result<(), ErrorResponse> {
+    for (label, webview) in app.webviews() {
+        if id_from_label(&label).is_some() {
+            let _ = webview.hide();
+        }
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn browser_close<R: Runtime>(app: AppHandle<R>, id: String) -> Result<(), ErrorResponse> {
     if let Some(webview) = browser_webview(&app, &id)? {
