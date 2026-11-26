@@ -1,5 +1,6 @@
 import { useEffect, useState, type RefObject } from "react";
 import {
+  hideAllBrowserViews,
   hideBrowserView,
   setBrowserViewBounds,
   showBrowserView,
@@ -88,6 +89,9 @@ export function useBrowserView(
   // Leaving the tab (or the browser page) hides its page; it stays loaded, like
   // a background tab, until the tab is closed.
   useEffect(() => () => void hideBrowserView(tabId).catch(() => {}), [tabId]);
+  // Leaving the browser page altogether hides every page, not just this tab's:
+  // nothing a web page draws belongs over the rest of the app.
+  useEffect(() => () => void hideAllBrowserViews().catch(() => {}), []);
 
   return { error };
 }

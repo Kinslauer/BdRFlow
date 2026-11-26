@@ -715,6 +715,7 @@ pub fn run() {
             commands::browser::browser_navigate,
             commands::browser::browser_set_bounds,
             commands::browser::browser_hide,
+            commands::browser::browser_hide_all,
             commands::browser::browser_close,
             commands::browser::browser_retain,
             commands::browser::browser_reload,
