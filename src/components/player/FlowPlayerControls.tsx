@@ -254,6 +254,11 @@ export const FlowPlayerControls: React.FC<FlowPlayerControlsProps> = ({
   const showSponsorBlock = usePlayerButton("sponsorBlock");
   const showQuality = usePlayerButton("quality");
   const showCaptions = usePlayerButton("captions");
+  // Outside fullscreen the chapter pill only appears for videos with chapters, so this button
+  // is the way into the transcript for a video that only has captions.
+  const showPanelButton =
+    showChapters &&
+    (isFullscreen || (!isPopOut && !isPip && (chapters.length > 0 || captions.length > 0)));
   const showPlayOn = usePlayerButton("playOn");
   const showTheater = usePlayerButton("theater");
   const showFullscreen = usePlayerButton("fullscreen");
@@ -877,18 +882,6 @@ export const FlowPlayerControls: React.FC<FlowPlayerControlsProps> = ({
             </div>
 
             <div className="flex items-center gap-1 sm:gap-2 bg-chrome-black/20 rounded-full px-1 py-1">
-              {isFullscreen && showChapters && (
-                <button
-                  type="button"
-                  title={getString("player_panel_chapters")}
-                  aria-label={getString("player_panel_chapters")}
-                  aria-pressed={panelOpen("chapters")}
-                  onClick={() => togglePanel("chapters")}
-                  className={panelButtonClass("chapters")}
-                >
-                  <ScrollText size={19} />
-                </button>
-              )}
               {showQueue && (
                 <button
                   type="button"
@@ -958,6 +951,18 @@ export const FlowPlayerControls: React.FC<FlowPlayerControlsProps> = ({
               >
                 {qualityLabel(selectedQualityId || "auto", supportedQualities, activeQualityLabel)}
               </button>
+              )}
+              {showPanelButton && (
+                <button
+                  type="button"
+                  title={getString("player_panel_chapters")}
+                  aria-label={getString("player_panel_chapters")}
+                  aria-pressed={panelOpen("chapters")}
+                  onClick={() => togglePanel("chapters")}
+                  className={panelButtonClass("chapters")}
+                >
+                  <ScrollText size={19} />
+                </button>
               )}
               {showCaptions && (
               <button

@@ -1462,7 +1462,7 @@
   "settings_button_volume": "Volume",
   "settings_button_volume_desc": "Show the volume button and slider on the player",
   "settings_button_chapters": "Chapters",
-  "settings_button_chapters_desc": "Show the chapter name, and the chapters button in fullscreen",
+  "settings_button_chapters_desc": "Show the chapter name, and the chapters and transcript button",
   "settings_button_autoplay": "Autoplay",
   "settings_button_autoplay_desc": "Show the autoplay switch on the player",
   "settings_button_queue": "Queue",
