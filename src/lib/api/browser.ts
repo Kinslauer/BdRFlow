@@ -19,6 +19,13 @@ export const BROWSER_STATE_EVENT = "flow:browser-state";
 /** Backend → main window: a page asked for a new window (`window.open`, target=_blank). */
 export const BROWSER_OPEN_TAB_EVENT = "flow:browser-open-tab";
 
+/** Backend → main window: Back or Forward pressed inside a page (Alt+Left/Right, mouse side buttons). */
+export const BROWSER_HISTORY_EVENT = "flow:browser-history";
+
+export interface BrowserHistoryPayload {
+  delta: number;
+}
+
 export interface BrowserStatePayload {
   id: string;
   kind: "loadStarted" | "loadFinished" | "title";

@@ -13,6 +13,8 @@ import { activeTab, useTabsStore } from "../store/useTabsStore";
 import { useMusicPlayerStore } from "../store/useMusicPlayerStore";
 import { usePlayerStore } from "../store/usePlayerStore";
 import { IS_MAIN_WINDOW } from "../lib/appWindow";
+import { HistoryArrows } from "../components/layout/HistoryArrows";
+import { usePopoutForWebTab } from "../lib/usePopoutForWebTab";
 
 
 /*
@@ -40,6 +42,9 @@ export default function Browser() {
   const inSync = activePath === currentPath;
   // Web pages are child views of the main window; another window can't show them.
   const { error } = useBrowserView(tabId, url, viewRef, inSync && IS_MAIN_WINDOW);
+  // A video playing when a web tab comes up moves to the pop-out player, so
+  // the page gets the whole window.
+  usePopoutForWebTab(tabId, inSync && IS_MAIN_WINDOW);
 
   const [address, setAddress] = useState(url ?? "");
   const [editing, setEditing] = useState(false);
@@ -85,7 +90,8 @@ export default function Browser() {
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div className="flex shrink-0 items-center gap-1 px-3 pb-2">
+      <div className="flex shrink-0 items-center gap-1 px-3 py-2">
+        <HistoryArrows size="sm" />
         {url && (
           <IconButton
             size="sm"

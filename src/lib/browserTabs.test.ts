@@ -92,6 +92,16 @@ describe("handleBrowserState", () => {
     expect(title()).toBe("Inbox");
   });
 
+  it("records a single-page move to another page as a new history entry", () => {
+    const id = startOn(A);
+    handleBrowserState({ id, kind: "loadFinished", url: A });
+    handleBrowserState({ id, kind: "title", url: `${A}repo/issues`, title: "Issues" });
+    expect(path()).toBe(browsePath(`${A}repo/issues`));
+    expect(back()).toEqual([browsePath(A)]);
+    handleBrowserState({ id, kind: "title", url: `${A}repo/issues#comment-1`, title: "Issues" });
+    expect(back()).toEqual([browsePath(A)]);
+  });
+
   it("updates a background tab without switching to it", () => {
     const id = startOn(A);
     handleBrowserState({ id, kind: "loadFinished", url: A });

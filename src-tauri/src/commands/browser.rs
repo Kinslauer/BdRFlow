@@ -25,6 +25,9 @@ const LABEL_PREFIX: &str = "browser-";
 const STATE_EVENT: &str = "flow:browser-state";
 /// A page asked for a new window; the frontend opens it as a new browser tab.
 const OPEN_TAB_EVENT: &str = "flow:browser-open-tab";
+/// Back or Forward pressed inside a page (Alt+Left/Right, mouse side buttons);
+/// the frontend moves the active tab's history.
+const HISTORY_EVENT: &str = "flow:browser-history";
 
 /// The area the browser page reserves, in CSS pixels relative to the main
 /// window's content area (which is where the main webview starts too).
@@ -44,6 +47,12 @@ struct BrowserStatePayload {
     url: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     title: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct BrowserHistoryPayload {
+    /// -1 for Back, 1 for Forward.
+    delta: i32,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -86,6 +95,56 @@ const BACKGROUND_LINK_SCRIPT: &str = r#"(() => {
     if (event.button === 0 && (event.ctrlKey || event.metaKey) && !event.shiftKey && !event.altKey) openBehind(event);
   }, true);
 })();"#;
+
+/// Where [`HISTORY_SCRIPT`] sends Back/Forward. The host is reserved
+/// (`.invalid` never resolves), and the navigation is cancelled before it
+/// starts: it only carries the gesture out of the page, which has no IPC.
+const HISTORY_HOST: &str = "flow-history.invalid";
+
+/// Runs in every browser page. Back/Forward pressed while the page has focus
+/// (Alt+Left/Right, the mouse side buttons, the keyboard's Back/Forward keys)
+/// would otherwise move the webview's own history, which the tab doesn't
+/// follow. They are stopped here and handed to the app, which moves the tab's
+/// history the same way the toolbar arrows do.
+const HISTORY_SCRIPT: &str = r#"(() => {
+  if (window.top !== window) return;
+  const go = (event, delta) => {
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    location.assign("https://flow-history.invalid/" + (delta < 0 ? "back" : "forward"));
+  };
+  addEventListener("keydown", (event) => {
+    if (event.defaultPrevented || event.shiftKey || event.ctrlKey || event.metaKey) return;
+    if (event.altKey && event.key === "ArrowLeft") go(event, -1);
+    else if (event.altKey && event.key === "ArrowRight") go(event, 1);
+    else if (!event.altKey && event.key === "BrowserBack") go(event, -1);
+    else if (!event.altKey && event.key === "BrowserForward") go(event, 1);
+  }, true);
+  const swallow = (event) => {
+    if (event.button === 3 || event.button === 4) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    }
+  };
+  addEventListener("mousedown", swallow, true);
+  addEventListener("auxclick", swallow, true);
+  addEventListener("mouseup", (event) => {
+    if (event.button === 3) go(event, -1);
+    else if (event.button === 4) go(event, 1);
+  }, true);
+})();"#;
+
+/// The Back/Forward step a navigation to [`HISTORY_HOST`] stands for.
+fn history_delta(url: &Url) -> Option<i32> {
+    if url.host_str() != Some(HISTORY_HOST) {
+        return None;
+    }
+    match url.path() {
+        "/back" => Some(-1),
+        "/forward" => Some(1),
+        _ => Some(0),
+    }
+}
 
 /// The page a new-window request asks for, and whether it came from a
 /// background-tab click (see [`BACKGROUND_MARKER`]).
@@ -307,10 +366,23 @@ fn build_webview<R: Runtime>(
     let load_app = app.clone();
     let title_app = app.clone();
     let popup_app = app.clone();
+    let history_app = app.clone();
 
     #[allow(unused_mut)]
     let mut builder = WebviewBuilder::new(label, WebviewUrl::External(url))
-        .on_navigation(|url| {
+        .on_navigation(move |url| {
+            if let Some(delta) = history_delta(url) {
+                // Only pages on screen get keyboard and mouse input, so the
+                // gesture belongs to the active tab.
+                if delta != 0 {
+                    let _ = history_app.emit_to(
+                        MAIN_WINDOW_LABEL,
+                        HISTORY_EVENT,
+                        BrowserHistoryPayload { delta },
+                    );
+                }
+                return false;
+            }
             let allowed = is_allowed_url(url);
             if !allowed {
                 tracing::debug!(scheme = url.scheme(), "browser_navigation_blocked");
@@ -332,6 +404,7 @@ fn build_webview<R: Runtime>(
             }
         })
         .initialization_script(BACKGROUND_LINK_SCRIPT)
+        .initialization_script(HISTORY_SCRIPT)
         .on_new_window(move |url, _features| {
             if is_allowed_url(&url) && url.scheme() != "about" {
                 let (url, background) = new_tab_target(url);
@@ -550,6 +623,19 @@ mod tests {
         assert!(!is_allowed_url(&Url::parse("about:config").unwrap()));
         assert!(!is_allowed_url(&Url::parse("file:///tmp/x").unwrap()));
         assert!(!is_allowed_url(&Url::parse("mailto:a@b.c").unwrap()));
+    }
+
+    #[test]
+    fn history_gestures_are_recognised() {
+        let back = Url::parse("https://flow-history.invalid/back").unwrap();
+        let forward = Url::parse("https://flow-history.invalid/forward").unwrap();
+        let other = Url::parse("https://flow-history.invalid/x").unwrap();
+        let page = Url::parse("https://example.com/back").unwrap();
+        assert_eq!(history_delta(&back), Some(-1));
+        assert_eq!(history_delta(&forward), Some(1));
+        assert_eq!(history_delta(&other), Some(0));
+        assert_eq!(history_delta(&page), None);
+        assert!(HISTORY_SCRIPT.contains(HISTORY_HOST));
     }
 
     #[test]

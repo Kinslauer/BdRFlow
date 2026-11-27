@@ -1,5 +1,5 @@
 import { useLocation, useNavigate } from 'react-router-dom';
-import { ArrowLeft, ArrowRight, HatGlasses, PanelLeftClose, PanelLeftOpen, Settings } from 'lucide-react';
+import { HatGlasses, PanelLeftClose, PanelLeftOpen, Settings } from 'lucide-react';
 import { usePlayerStore } from '../../store/usePlayerStore';
 import { useUiStore } from '../../store/useUiStore';
 import { useAppSettingsStore } from '../../store/useAppSettingsStore';
@@ -10,7 +10,8 @@ import { SETTINGS } from '../../lib/settings/schema';
 import { getString } from '../../lib/i18n/index';
 import { toggleDeepFlow } from '../../lib/deepFlow';
 import { NotificationsBell } from '../notifications/NotificationsBell';
-import { activeTab, useTabsStore } from '../../store/useTabsStore';
+import { useTabsStore } from '../../store/useTabsStore';
+import { HistoryArrows } from './HistoryArrows';
 import { ProfileMenuButton } from '../profiles/ProfileMenuButton';
 import { useSidebarDrawer } from '../../lib/useSidebarDrawer';
 
@@ -32,12 +33,7 @@ export function Topbar() {
   const sidebarOpen = usesDrawer ? isWatchSidebarOpen : isSidebarExpanded;
   const showAppLogo = useAppSettingsStore((state) => state.values[SETTINGS.SHOW_APP_LOGO_ICON] !== 'false');
   const deepFlowActive = useAppSettingsStore((state) => state.values[SETTINGS.DEEP_FLOW_ACTIVE] === 'true');
-  const canGoBack = useTabsStore((state) => activeTab(state).index > 0);
   const tabCount = useTabsStore((state) => state.tabs.length);
-  const canGoForward = useTabsStore((state) => {
-    const tab = activeTab(state);
-    return tab.index < tab.entries.length - 1;
-  });
 
   return (
     <header
@@ -72,24 +68,7 @@ export function Topbar() {
           </div>
         )}
         <div className="hidden ms-1 items-center sm:flex">
-          <IconButton
-            title={getString('topbar_back')}
-            aria-label={getString('topbar_back')}
-            onClick={() => navigate(-1)}
-            disabled={!canGoBack}
-            className="text-chrome-neutral-300 hover:text-chrome-neutral-100"
-          >
-            <ArrowLeft className="rtl:-scale-x-100" />
-          </IconButton>
-          <IconButton
-            title={getString('topbar_forward')}
-            aria-label={getString('topbar_forward')}
-            onClick={() => navigate(1)}
-            disabled={!canGoForward}
-            className="text-chrome-neutral-300 hover:text-chrome-neutral-100"
-          >
-            <ArrowRight className="rtl:-scale-x-100" />
-          </IconButton>
+          <HistoryArrows />
         </div>
       </div>
 
