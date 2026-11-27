@@ -1,16 +1,18 @@
 import { useEffect } from "react";
 import { listen } from "@tauri-apps/api/event";
 import {
+  BROWSER_HISTORY_EVENT,
   BROWSER_OPEN_TAB_EVENT,
   BROWSER_STATE_EVENT,
   closeBrowserView,
   retainBrowserViews,
+  type BrowserHistoryPayload,
   type BrowserOpenTabPayload,
   type BrowserStatePayload,
 } from "./api/browser";
 import { browsePath, isBrowsePath, isWebUrl } from "./browserUrl";
 import { createPath } from "react-router-dom";
-import { useTabsStore } from "../store/useTabsStore";
+import { activeTab, useTabsStore } from "../store/useTabsStore";
 import { selectBrowserPage, useBrowserStore } from "../store/useBrowserStore";
 import { currentEntry, type TabHistory } from "./tabs/tabHistory";
 import { switchToTab } from "./tabs/tabPlayback";
@@ -48,6 +50,18 @@ function recordTabNavigation(id: string, path: string, kind: "push" | "replace",
   if (!title) return;
   const updated = useTabsStore.getState().tabs.find((t) => t.id === id);
   if (updated) useTabsStore.getState().setTabTitle(id, currentEntry(updated).key, title);
+}
+
+/** The address without its fragment: a change of fragment alone stays on the same page. */
+function documentAddress(url: string | null): string | null {
+  if (!url) return null;
+  try {
+    const parsed = new URL(url);
+    parsed.hash = "";
+    return parsed.href;
+  } catch {
+    return url;
+  }
 }
 
 /** The title shown for a tab's current page, if it has one. */
@@ -88,10 +102,13 @@ export function handleBrowserState(event: BrowserStatePayload) {
     }
     case "title": {
       const title = event.title?.trim() ?? "";
-      // Single-page sites change their address without a page load.
+      // Single-page sites change their address without a page load. Moving to
+      // another page of the site is a step Back can return to; a change of
+      // fragment only (an in-page anchor, a hash route's state) is not.
       if (!page.pending && page.url !== event.url) {
+        const newPage = documentAddress(page.url) !== documentAddress(event.url);
         browser.update(event.id, { url: event.url });
-        recordTabNavigation(event.id, path, "replace");
+        recordTabNavigation(event.id, path, newPage ? "push" : "replace");
       }
       const now = useTabsStore.getState().tabs.find((t) => t.id === event.id);
       if (title && now) useTabsStore.getState().setTabTitle(event.id, currentEntry(now).key, title);
@@ -119,6 +136,17 @@ export function useBrowserTabsController() {
     track(
       listen<BrowserOpenTabPayload>(BROWSER_OPEN_TAB_EVENT, (e) => {
         if (isWebUrl(e.payload.url)) openWebTab(e.payload.url, !e.payload.background);
+      }),
+    );
+
+    // Back/Forward pressed inside a page: only the page on screen gets input,
+    // so it is the active tab's history that moves.
+    track(
+      listen<BrowserHistoryPayload>(BROWSER_HISTORY_EVENT, (e) => {
+        const delta = e.payload.delta;
+        if (delta !== -1 && delta !== 1) return;
+        const tabs = useTabsStore.getState();
+        if (isBrowserTab(activeTab(tabs))) tabs.go(delta);
       }),
     );
 

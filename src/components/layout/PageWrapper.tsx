@@ -87,9 +87,11 @@ export function PageWrapper() {
 
   return (
     <div className="flex h-full flex-col bg-background text-chrome-zinc-100 overflow-hidden font-sans">
-      <Topbar />
+      {/* A web tab gets the whole window: its own toolbar carries Back and
+          Forward, and the tab strip is still there to get back to Flow. */}
+      {!isBrowserPage && <Topbar />}
       <div className="flex flex-1 overflow-hidden">
-        <Sidebar />
+        {!isBrowserPage && <Sidebar />}
         <main
           ref={mainRef}
           className={
